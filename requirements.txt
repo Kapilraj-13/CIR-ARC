@@ -1,0 +1,9 @@
+numpy
+scipy
+matplotlib
+pytest
+pytest-cov
+tqdm
+jsonschema
+Pillow
+pyyaml
