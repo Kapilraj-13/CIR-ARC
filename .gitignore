@@ -37,3 +37,5 @@ Thumbs.db
 
 data/
 datasets/
+checkpoints/
+.agents/

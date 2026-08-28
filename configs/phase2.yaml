@@ -1,0 +1,51 @@
+# CIR-ARC Phase 2 Configuration
+# Object-Centric Neural Perception with Slot Attention
+
+model:
+  num_colors: 11          # 0-9 ARC discrete colors + 10 mask/padding token
+  embed_dim: 48           # Color embedding dimension
+  stem_hidden_dim: 64     # CNN stem intermediate channels
+  stem_out_dim: 128       # CNN stem feature token dimension
+  n_slots: 24             # Maximum object slots K
+  slot_dim: 128           # Dimensionality of slot vectors
+  feat_dim: 128           # Input visual feature token dimension
+  n_iter: 3               # Slot attention refinement iterations
+  mlp_hidden_dim: 256     # Slot attention residual MLP hidden dimension
+  max_h: 30               # Maximum supported grid height
+  max_w: 30               # Maximum supported grid width
+  prop_hidden_dim: 64     # Property prediction heads MLP hidden dimension
+  num_shapes: 8           # Categorical shape classes
+  num_orientations: 4     # Orientation bins (0, 90, 180, 270 degrees)
+  num_symmetries: 4       # Binary symmetry axes
+  recon_num_colors: 10    # Target output colors (0-9)
+
+training:
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  clip_grad_norm: 1.0
+  batch_size: 16
+  epochs: 50
+  num_workers: 0          # Windows multiprocessing safety
+  seed: 42
+  device: "cuda"
+
+loss_weights:
+  recon_weight: 1.0
+  color_weight: 1.0
+  pos_weight: 1.0
+  size_weight: 1.0
+  obj_weight: 0.5
+  div_weight: 0.01
+  sparse_weight: 0.01
+
+data:
+  train_dir: "data/synthetic/train"
+  held_out_dir: "data/synthetic/held_out"
+  pad_token: 10
+  max_grid_dim: 30
+
+experiment:
+  name: "phase2_slot_attention_baseline"
+  checkpoint_dir: "checkpoints/phase2"
+  save_interval_epochs: 5
+  log_interval_steps: 100

@@ -12,7 +12,7 @@ class ArcObject:
     """One connected region in a grid."""
     color: int
     pixels: np.ndarray          # shape (N, 2), each row is (row, col)
-    connectivity: int           # 4 or 8
+    connectivity: int = 4       # 4 or 8
 
     @property
     def size(self) -> int:
