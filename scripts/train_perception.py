@@ -60,12 +60,12 @@ def evaluate(model: PerceptionModel, val_loader: DataLoader, device: torch.devic
 
             outputs = model(grids, mask=masks)
             metrics = compute_perception_metrics(
-                pred_recon_logits=outputs["recon_logits"],
-                target_grids=grids,
-                pred_objectness=outputs["objectness"],
+                pred_logits=outputs["recon_logits"],
+                target_grid=grids,
+                objectness=outputs["objectness"],
                 pred_props=outputs["props"],
-                gt_objects=gt_objects,
-                masks=masks,
+                gt_objects_batch=gt_objects,
+                mask=masks,
                 heights=heights,
                 widths=widths,
             )
@@ -184,10 +184,10 @@ def main():
 
         if val_loader:
             val_metrics = evaluate(model, val_loader, device)
-            f1 = val_metrics.get("object_detection_f1", 0.0)
-            recon_acc = val_metrics.get("reconstruction_accuracy", 0.0)
-            col_acc = val_metrics.get("color_accuracy", 0.0)
-            pos_mae = val_metrics.get("position_mae", 0.0)
+            f1 = val_metrics.get("object_f1", 0.0)
+            recon_acc = val_metrics.get("recon_acc", 0.0)
+            col_acc = val_metrics.get("color_acc", 0.0)
+            pos_mae = val_metrics.get("pos_mae", 0.0)
             log_str += f" | Val F1: {f1:.3f} | Recon Acc: {recon_acc:.3f} | Color Acc: {col_acc:.3f} | Pos MAE: {pos_mae:.3f}"
 
             if f1 > best_f1:
