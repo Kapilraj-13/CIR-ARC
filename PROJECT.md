@@ -60,10 +60,10 @@ Discrete Grid (B, H, W) [values 0-9, mask 10]
 | # | Name | Scope | Dependencies | Status |
 |---|------|-------|-------------|--------|
 | M1 | Neural Perception Pipeline | `src/cir_arc/neural/perception/` (embedding, cnn_stem, slot_attention, property_heads, reconstruction) | None | DONE |
-| M2 | Loss Functions & Matching | `src/cir_arc/neural/losses/` (matching, reconstruction, property, diversity) | M1 | PLANNED |
-| M3 | Training Infra & Dataset | `src/cir_arc/neural/training/` (trainer with PerceptionModel, dataset) & `configs/phase2.yaml` | M1, M2 | PLANNED |
-| M4 | Perception Metrics | `src/cir_arc/neural/evaluation/perception_metrics.py` | M1, M2 | PLANNED |
-| M5 | Final Integration & E2E Verification | Pass all Phase 1 & Phase 2 tests, verify parameter count, attention sums, checkpointing, git commit | M1, M2, M3, M4, E2E | PLANNED |
+| M2 | Loss Functions & Matching | `src/cir_arc/neural/losses/` (matching, reconstruction, property, diversity) | M1 | DONE |
+| M3 | Training Infra & Dataset | `src/cir_arc/neural/training/` (trainer with PerceptionModel, dataset) & `configs/phase2.yaml` | M1, M2 | DONE |
+| M4 | Perception Metrics | `src/cir_arc/neural/evaluation/perception_metrics.py` | M1, M2 | DONE |
+| M5 | Final Integration & E2E Verification | Pass all Phase 1 & Phase 2 tests, verify parameter count, attention sums, checkpointing, git commit | M1, M2, M3, M4, E2E | DONE |
 
 ## Interface Contracts
 
