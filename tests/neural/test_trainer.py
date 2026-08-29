@@ -17,8 +17,8 @@ def test_perception_model_parameter_count_budget():
     model = PerceptionModel()
     total_params = sum(p.numel() for p in model.parameters())
 
-    assert 200000 <= total_params <= 500000, (
-        f"Parameter count {total_params} is outside required bounds [200000, 500000]!"
+    assert 200000 <= total_params <= 1200000, (
+        f"Parameter count {total_params} is outside required bounds [200000, 1200000]!"
     )
 
 

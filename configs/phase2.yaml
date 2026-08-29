@@ -1,16 +1,18 @@
 # CIR-ARC Phase 2 Configuration
-# Object-Centric Neural Perception with Slot Attention
+# Object-Centric Multi-Scale Neural Perception with Set Transformer & Proposal-Guided Slot Attention
 
 model:
   num_colors: 11          # 0-9 ARC discrete colors + 10 mask/padding token
   embed_dim: 48           # Color embedding dimension
-  stem_hidden_dim: 64     # CNN stem intermediate channels
-  stem_out_dim: 128       # CNN stem feature token dimension
+  stem_hidden_dim: 64     # CNN stem stage 1 intermediate channels
+  stem_out_dim: 128       # Multi-scale CNN stem feature token dimension
   n_slots: 24             # Maximum object slots K
   slot_dim: 128           # Dimensionality of slot vectors
   feat_dim: 128           # Input visual feature token dimension
-  n_iter: 3               # Slot attention refinement iterations
+  n_iter: 3               # Slot attention competitive refinement iterations
   mlp_hidden_dim: 256     # Slot attention residual MLP hidden dimension
+  relation_layers: 2      # Relational Set Transformer self-attention blocks
+  relation_heads: 4       # Multi-head attention heads in relation encoder
   max_h: 30               # Maximum supported grid height
   max_w: 30               # Maximum supported grid width
   prop_hidden_dim: 64     # Property prediction heads MLP hidden dimension
@@ -30,13 +32,18 @@ training:
   device: "cuda"
 
 loss_weights:
-  recon_weight: 1.0
-  color_weight: 1.0
-  pos_weight: 1.0
-  size_weight: 1.0
-  obj_weight: 0.5
-  div_weight: 0.01
-  sparse_weight: 0.01
+  recon_weight: 1.0       # Grid cell-level cross-entropy
+  color_weight: 1.0       # Hungarian-matched object color cross-entropy
+  pos_weight: 1.0         # Hungarian-matched object centroid MSE
+  size_weight: 1.0        # Hungarian-matched object normalized area MSE
+  shape_weight: 0.5       # Hungarian-matched object categorical shape CE
+  obj_weight: 0.5         # Slot objectness binary cross-entropy
+  bound_weight: 0.5       # Spatial boundary map binary cross-entropy
+  cell_obj_weight: 0.5    # Cell-level foreground objectness BCE
+  mask_weight: 0.5        # Hungarian-matched per-slot spatial mask BCE + Dice
+  excl_weight: 0.05       # Mask spatial exclusivity penalty
+  div_weight: 0.01        # Slot cosine diversity penalty
+  sparse_weight: 0.01     # Objectness L1 sparsity regularization
 
 data:
   train_dir: "data/synthetic/train"
@@ -45,7 +52,7 @@ data:
   max_grid_dim: 30
 
 experiment:
-  name: "phase2_slot_attention_baseline"
+  name: "phase2_multiscale_slot_perception"
   checkpoint_dir: "checkpoints/phase2"
   save_interval_epochs: 5
   log_interval_steps: 100

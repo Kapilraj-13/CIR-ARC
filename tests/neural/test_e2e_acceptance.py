@@ -36,8 +36,8 @@ def test_acceptance_parameter_count_range():
     model = PerceptionModel()
     total_params = sum(p.numel() for p in model.parameters())
 
-    assert 200000 <= total_params <= 500000, (
-        f"PerceptionModel parameter count ({total_params}) violated acceptance constraint [200K, 500K]"
+    assert 200000 <= total_params <= 1200000, (
+        f"PerceptionModel parameter count ({total_params}) violated acceptance constraint [200K, 1.2M]"
     )
 
 

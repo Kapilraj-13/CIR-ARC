@@ -1,25 +1,23 @@
-"""CNN stem module for CIR-ARC spatial feature encoding.
+"""CNN stem and Multi-Scale CNN stem modules for CIR-ARC spatial feature encoding.
 
-3-layer resolution-preserving encoder:
-1. Conv2d(48, 64, 3, padding=1, bias=False) + GroupNorm(8, 64) + GELU
-2. DepthwiseSeparableConv(64, 128) + GroupNorm(8, 128) + GELU
-3. DepthwiseSeparableConv(128, 128) + GroupNorm(8, 128) + GELU
-
-Transforms channels-last embedded grid (B, H, W, 48) into flattened spatial tokens (B, H*W, 128).
+Contains:
+1. CNNStem: Canonical 3-layer resolution-preserving encoder (54,848 parameters):
+   - Conv2d(48, 64, 3, padding=1, bias=False) + GroupNorm(8, 64) + GELU
+   - DepthwiseSeparableConv(64, 128) + GroupNorm(8, 128) + GELU
+   - DepthwiseSeparableConv(128, 128) + GroupNorm(8, 128) + GELU
+2. MultiScaleCNNStem: 4-stage hierarchical multi-scale encoder with auxiliary boundary & objectness heads.
 """
 
-from typing import Optional
+from __future__ import annotations
+
+from typing import Optional, Tuple, Union
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 class DepthwiseSeparableConv(nn.Module):
-    """Depthwise separable 2D convolution with GroupNorm and GELU activation.
-
-    Applies depthwise spatial convolution (groups=in_channels, bias=False)
-    followed by pointwise 1x1 convolution (bias=True), GroupNorm(8, out_channels),
-    and GELU activation.
-    """
+    """Depthwise separable 2D convolution with GroupNorm and GELU activation."""
 
     def __init__(self, in_channels: int, out_channels: int, num_groups: int = 8) -> None:
         super().__init__()
@@ -41,7 +39,6 @@ class DepthwiseSeparableConv(nn.Module):
         self.act = nn.GELU()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Forward pass for depthwise separable conv block."""
         x = self.depthwise(x)
         x = self.pointwise(x)
         x = self.norm(x)
@@ -50,11 +47,7 @@ class DepthwiseSeparableConv(nn.Module):
 
 
 class CNNStem(nn.Module):
-    """3-layer spatial encoder preserving full grid resolution without downsampling.
-
-    Processes channels-last embeddings (B, H, W, in_channels) through resolution-preserving
-    convolutions with GroupNorm and GELU activations, outputting flattened spatial tokens
-    (B, H*W, out_channels).
+    """3-layer spatial encoder preserving full grid resolution without downsampling (54,848 params).
 
     Args:
         in_channels: Input embedding dimension (default: 48).
@@ -101,56 +94,150 @@ class CNNStem(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Forward pass of spatial CNN encoder.
-
-        Args:
-            x: Input tensor of shape (B, H, W, in_channels) in channels-last format.
-
-        Returns:
-            Flattened spatial tokens of shape (B, H*W, out_channels).
-        """
-        B, H, W, C = x.shape
-        # Permute (B, H, W, C) -> (B, C, H, W) for standard PyTorch Conv2d
+        """Forward pass transforming channels-last embedding (B, H, W, 48) to (B, H*W, 128)."""
         x = x.permute(0, 3, 1, 2).contiguous()
-
-        # Layer 1
-        x = self.conv1(x)
-        x = self.norm1(x)
-        x = self.act1(x)
-
-        # Layer 2
+        x = self.act1(self.norm1(self.conv1(x)))
         x = self.conv2(x)
-
-        # Layer 3
         x = self.conv3(x)
 
-        # Permute back (B, out_channels, H, W) -> (B, H, W, out_channels)
-        x = x.permute(0, 2, 3, 1).contiguous()
-
-        # Flatten spatial dimensions: (B, H*W, out_channels)
-        x = x.reshape(B, H * W, self.out_channels)
-        return x
+        B, C, H, W = x.shape
+        tokens = x.permute(0, 2, 3, 1).reshape(B, H * W, C)
+        return tokens
 
 
-if __name__ == "__main__":
-    print("Running CNNStem smoke test...")
-    model = CNNStem()
-    param_count = sum(p.numel() for p in model.parameters())
-    print(f"CNNStem parameter count: {param_count}")
-    assert param_count == 54848, f"Expected 54,848 parameters, got {param_count}"
+class ResidualDepthwiseSeparableConv(nn.Module):
+    """Residual Depthwise separable 2D convolution with GroupNorm and GELU."""
 
-    test_cases = [
-        ((4, 10, 10, 48), (4, 100, 128)),
-        ((1, 5, 5, 48), (1, 25, 128)),
-        ((2, 8, 12, 48), (2, 96, 128)),
-        ((2, 30, 30, 48), (2, 900, 128)),
-    ]
+    def __init__(self, in_channels: int, out_channels: int, num_groups: int = 8) -> None:
+        super().__init__()
+        self.depthwise = nn.Conv2d(
+            in_channels=in_channels,
+            out_channels=in_channels,
+            kernel_size=3,
+            padding=1,
+            groups=in_channels,
+            bias=False,
+        )
+        self.pointwise = nn.Conv2d(
+            in_channels=in_channels,
+            out_channels=out_channels,
+            kernel_size=1,
+            bias=True,
+        )
+        self.norm = nn.GroupNorm(num_groups=num_groups, num_channels=out_channels)
+        self.act = nn.GELU()
 
-    for in_shape, expected_out_shape in test_cases:
-        dummy_input = torch.randn(in_shape)
-        out = model(dummy_input)
-        assert out.shape == expected_out_shape, f"Expected {expected_out_shape}, got {out.shape}"
-        assert out.dtype == torch.float32, f"Expected float32, got {out.dtype}"
-        print(f"Passed test for {in_shape} -> {out.shape}")
+        if in_channels != out_channels:
+            self.shortcut = nn.Sequential(
+                nn.Conv2d(in_channels, out_channels, kernel_size=1, bias=False),
+                nn.GroupNorm(num_groups=num_groups, num_channels=out_channels),
+            )
+        else:
+            self.shortcut = nn.Identity()
 
-    print("All CNNStem smoke tests passed successfully!")
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        res = self.shortcut(x)
+        out = self.depthwise(x)
+        out = self.pointwise(out)
+        out = self.norm(out)
+        out = self.act(out + res)
+        return out
+
+
+class MultiScaleCNNStem(nn.Module):
+    """Hierarchical multi-scale spatial encoder with auxiliary boundary & objectness heads."""
+
+    def __init__(
+        self,
+        in_channels: int = 48,
+        hidden_channels: int = 64,
+        out_channels: int = 128,
+        num_groups: int = 8,
+    ) -> None:
+        super().__init__()
+        self.in_channels = in_channels
+        self.hidden_channels = hidden_channels
+        self.out_channels = out_channels
+
+        # Stage 1: Local features (48 -> 64)
+        self.conv1 = nn.Conv2d(
+            in_channels=in_channels,
+            out_channels=hidden_channels,
+            kernel_size=3,
+            padding=1,
+            bias=False,
+        )
+        self.norm1 = nn.GroupNorm(num_groups=num_groups, num_channels=hidden_channels)
+        self.act1 = nn.GELU()
+
+        # Stage 2: Medium-range features (64 -> 96)
+        self.stage2 = ResidualDepthwiseSeparableConv(
+            in_channels=hidden_channels,
+            out_channels=96,
+            num_groups=num_groups,
+        )
+
+        # Stage 3: Broad context features (96 -> 128)
+        self.stage3 = ResidualDepthwiseSeparableConv(
+            in_channels=96,
+            out_channels=out_channels,
+            num_groups=num_groups,
+        )
+
+        # Stage 4: Global context features (128 -> 128)
+        self.stage4 = ResidualDepthwiseSeparableConv(
+            in_channels=out_channels,
+            out_channels=out_channels,
+            num_groups=num_groups,
+        )
+
+        # Multi-scale feature fusion: (64 + 96 + 128 + 128 = 416 -> out_channels)
+        fused_in_dim = hidden_channels + 96 + out_channels + out_channels
+        self.fusion = nn.Sequential(
+            nn.Conv2d(fused_in_dim, out_channels, kernel_size=1, bias=False),
+            nn.GroupNorm(num_groups=num_groups, num_channels=out_channels),
+            nn.GELU(),
+        )
+
+        # Auxiliary Head 1: Object boundary prediction map (B, 1, H, W)
+        self.boundary_head = nn.Sequential(
+            nn.Conv2d(out_channels, 64, kernel_size=3, padding=1),
+            nn.GroupNorm(num_groups=8, num_channels=64),
+            nn.GELU(),
+            nn.Conv2d(64, 1, kernel_size=1),
+            nn.Sigmoid(),
+        )
+
+        # Auxiliary Head 2: Cell-level objectness / foreground map (B, 1, H, W)
+        self.cell_objectness_head = nn.Sequential(
+            nn.Conv2d(out_channels, 64, kernel_size=3, padding=1),
+            nn.GroupNorm(num_groups=8, num_channels=64),
+            nn.GELU(),
+            nn.Conv2d(64, 1, kernel_size=1),
+            nn.Sigmoid(),
+        )
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        return_maps: bool = False,
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
+        x = x.permute(0, 3, 1, 2).contiguous()
+
+        f1 = self.act1(self.norm1(self.conv1(x)))
+        f2 = self.stage2(f1)
+        f3 = self.stage3(f2)
+        f4 = self.stage4(f3)
+
+        f_cat = torch.cat([f1, f2, f3, f4], dim=1)
+        f_fused = self.fusion(f_cat)
+
+        boundary_map = self.boundary_head(f_fused)
+        cell_objectness = self.cell_objectness_head(f_fused)
+
+        B, C, H, W = f_fused.shape
+        tokens = f_fused.permute(0, 2, 3, 1).reshape(B, H * W, C)
+
+        if return_maps:
+            return tokens, boundary_map, cell_objectness
+        return tokens

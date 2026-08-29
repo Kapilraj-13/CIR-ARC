@@ -61,6 +61,9 @@ def objectness_sparsity_loss(objectness: torch.Tensor) -> torch.Tensor:
     return torch.mean(torch.abs(objectness))
 
 
+slot_diversity_loss = diversity_loss
+
+
 class SlotDiversityLoss(nn.Module):
     """
     Module wrapper for Slot Diversity regularization.

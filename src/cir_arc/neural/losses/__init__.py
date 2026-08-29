@@ -1,37 +1,50 @@
-"""CIR-ARC Phase 2 Neural Loss Functions and Hungarian Matching."""
+"""Losses package for CIR-ARC neural perception training."""
 
-from cir_arc.neural.losses.matching import hungarian_matching
-from cir_arc.neural.losses.reconstruction import (
-    ReconstructionLoss,
-    reconstruction_loss,
-)
+from cir_arc.neural.losses.matching import hungarian_matching, compute_cost_matrix
+from cir_arc.neural.losses.reconstruction import reconstruction_loss
 from cir_arc.neural.losses.property import (
-    PropertyLoss,
     color_loss,
     position_loss,
     size_loss,
+    shape_loss,
+    orientation_loss,
+    symmetry_loss,
     objectness_loss,
     compute_property_losses,
+    PropertyLoss,
 )
 from cir_arc.neural.losses.diversity import (
-    SlotDiversityLoss,
-    ObjectnessSparsityLoss,
+    slot_diversity_loss,
     diversity_loss,
     objectness_sparsity_loss,
+)
+from cir_arc.neural.losses.boundary import (
+    boundary_loss,
+    cell_objectness_loss,
+)
+from cir_arc.neural.losses.mask import (
+    slot_mask_loss,
+    mask_exclusivity_loss,
 )
 
 __all__ = [
     "hungarian_matching",
-    "ReconstructionLoss",
+    "compute_cost_matrix",
     "reconstruction_loss",
-    "PropertyLoss",
     "color_loss",
     "position_loss",
     "size_loss",
+    "shape_loss",
+    "orientation_loss",
+    "symmetry_loss",
     "objectness_loss",
     "compute_property_losses",
-    "SlotDiversityLoss",
-    "ObjectnessSparsityLoss",
+    "PropertyLoss",
+    "slot_diversity_loss",
     "diversity_loss",
     "objectness_sparsity_loss",
+    "boundary_loss",
+    "cell_objectness_loss",
+    "slot_mask_loss",
+    "mask_exclusivity_loss",
 ]

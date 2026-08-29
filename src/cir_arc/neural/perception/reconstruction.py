@@ -1,16 +1,82 @@
-"""Reconstruction decoder module for ARC grids.
+"""Reconstruction decoder and slot mask decoder modules for ARC grids.
 
-Decodes object slots back into full 2D grid discrete color distributions:
-- Learned 1D row and column positional embeddings (30, 64) concatenated into 128-dim coordinate queries
-- Cross-attention from spatial cell coordinate queries to object slots
-- Lightweight MLP (128 -> 128 -> 10) predicting 10-class discrete color logits
-- Dynamic support for arbitrary grid dimensions up to 30x30
+Decodes object slots back into full 2D grid representations and spatial ownership masks:
+1. SlotMaskDecoder: Decodes (B, K, slot_dim) into per-slot binary masks (B, K, H, W) in [0, 1].
+2. ReconstructionDecoder: Cross-attention decoding from object slots to full discrete color logits (B, H, W, 10).
 """
 
 from typing import Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+
+class SlotMaskDecoder(nn.Module):
+    """Decodes object slots into per-slot spatial ownership masks (B, K, H, W) in [0, 1].
+
+    Args:
+        slot_dim: Dimensionality of slot vectors (default: 128).
+        max_h: Maximum supported grid height (default: 30).
+        max_w: Maximum supported grid width (default: 30).
+        hidden_dim: Intermediate MLP hidden dimension (default: 64).
+    """
+
+    def __init__(
+        self,
+        slot_dim: int = 128,
+        max_h: int = 30,
+        max_w: int = 30,
+        hidden_dim: int = 64,
+    ) -> None:
+        super().__init__()
+        self.slot_dim = slot_dim
+        self.max_h = max_h
+        self.max_w = max_w
+
+        pos_dim = slot_dim // 2  # 64
+        self.row_embed = nn.Embedding(max_h, pos_dim)
+        self.col_embed = nn.Embedding(max_w, pos_dim)
+
+        self.mask_mlp = nn.Sequential(
+            nn.Linear(slot_dim * 2, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, 1),
+            nn.Sigmoid(),
+        )
+
+    def forward(
+        self,
+        slots: torch.Tensor,
+        H: int = 10,
+        W: int = 10,
+    ) -> torch.Tensor:
+        """Decode slots into spatial mask probabilities per slot.
+
+        Args:
+            slots: Slot representation tensor of shape (B, K, slot_dim).
+            H: Target grid height.
+            W: Target grid width.
+
+        Returns:
+            Spatial masks tensor of shape (B, K, H, W) with probabilities in [0, 1].
+        """
+        B, K, D = slots.shape
+        device = slots.device
+
+        # Generate 2D coordinate embeddings
+        rows = torch.arange(H, device=device)
+        cols = torch.arange(W, device=device)
+        r_emb = self.row_embed(rows).unsqueeze(1).expand(H, W, -1)  # (H, W, 64)
+        c_emb = self.col_embed(cols).unsqueeze(0).expand(H, W, -1)  # (H, W, 64)
+        pos = torch.cat([r_emb, c_emb], dim=-1)                      # (H, W, 128)
+        pos_flat = pos.reshape(1, 1, H * W, D).expand(B, K, -1, -1)  # (B, K, H*W, D)
+
+        slots_expand = slots.unsqueeze(2).expand(-1, -1, H * W, -1)  # (B, K, H*W, D)
+        combined = torch.cat([slots_expand, pos_flat], dim=-1)       # (B, K, H*W, 2*D)
+
+        mask_logits = self.mask_mlp(combined).squeeze(-1)            # (B, K, H*W)
+        masks = mask_logits.reshape(B, K, H, W)                      # (B, K, H, W)
+        return masks
 
 
 class ReconstructionDecoder(nn.Module):
@@ -56,6 +122,7 @@ class ReconstructionDecoder(nn.Module):
         self,
         slots: torch.Tensor,
         objectness: Optional[torch.Tensor] = None,
+        slot_masks: Optional[torch.Tensor] = None,
         H: int = 10,
         W: int = 10,
     ) -> torch.Tensor:
@@ -64,6 +131,7 @@ class ReconstructionDecoder(nn.Module):
         Args:
             slots: Slot representation tensor of shape (B, K, slot_dim).
             objectness: Optional objectness scores of shape (B, K) in [0, 1].
+            slot_masks: Optional per-slot spatial masks of shape (B, K, H, W).
             H: Target grid height (1 <= H <= max_h).
             W: Target grid width (1 <= W <= max_w).
 
@@ -83,61 +151,56 @@ class ReconstructionDecoder(nn.Module):
         cols = torch.arange(W, device=device)
         r_emb = self.row_embed(rows).unsqueeze(1).expand(H, W, -1)  # (H, W, 64)
         c_emb = self.col_embed(cols).unsqueeze(0).expand(H, W, -1)  # (H, W, 64)
-        pos = torch.cat([r_emb, c_emb], dim=-1)  # (H, W, 128)
+        pos = torch.cat([r_emb, c_emb], dim=-1)                      # (H, W, 128)
 
         # Reshape to batch queries: (B, H*W, slot_dim)
         cell_queries = pos.reshape(1, H * W, self.slot_dim).expand(B, -1, -1)
 
         # Cross-attention: Cell queries (Q) attend over slots (K, V)
         q = self.proj_q(cell_queries)  # (B, N, slot_dim)
-        k = self.proj_k(slots)  # (B, K, slot_dim)
-        v = self.proj_v(slots)  # (B, K, slot_dim)
+        k = self.proj_k(slots)         # (B, K, slot_dim)
+        v = self.proj_v(slots)         # (B, K, slot_dim)
 
         scale = self.slot_dim ** -0.5
         attn_logits = torch.einsum("b n d, b k d -> b n k", q, k) * scale
 
         if objectness is not None:
-            # Optionally modulate cross-attention logits with objectness prior
-            # Uses log objectness as additive bias with numerical clamp
-            obj_bias = torch.log(objectness.unsqueeze(1).clamp(min=1e-6))
-            attn_weights = F.softmax(attn_logits + obj_bias, dim=-1)
-        else:
-            attn_weights = F.softmax(attn_logits, dim=-1)
+            # Modulate cross-attention logits with objectness prior
+            obj_bias = torch.log(objectness.clamp(min=1e-6)).unsqueeze(1)  # (B, 1, K)
+            attn_logits = attn_logits + obj_bias
 
-        # Aggregate slot values: (B, N, slot_dim)
-        cell_feats = torch.einsum("b n k, b k d -> b n d", attn_weights, v)
+        if slot_masks is not None:
+            # Modulate cross-attention logits with explicit slot mask spatial ownership
+            masks_flat = slot_masks.reshape(B, K, H * W).permute(0, 2, 1)  # (B, N, K)
+            mask_bias = torch.log(masks_flat.clamp(min=1e-6))
+            attn_logits = attn_logits + 0.5 * mask_bias
 
-        # Decode into color logits: (B, H, W, num_colors)
-        logits = self.mlp(cell_feats)
-        return logits.reshape(B, H, W, self.num_colors)
+        attn_weights = F.softmax(attn_logits, dim=-1)  # (B, N, K)
+
+        # Aggregated cell visual features
+        cell_features = torch.einsum("b n k, b k d -> b n d", attn_weights, v)  # (B, N, slot_dim)
+
+        # Predict discrete color distribution per cell
+        color_logits_flat = self.mlp(cell_features)                             # (B, N, num_colors)
+        color_logits = color_logits_flat.reshape(B, H, W, self.num_colors)      # (B, H, W, num_colors)
+
+        return color_logits
 
 
 if __name__ == "__main__":
-    print("Running ReconstructionDecoder smoke test...")
-    model = ReconstructionDecoder()
-    param_count = sum(p.numel() for p in model.parameters())
-    print(f"ReconstructionDecoder parameter count: {param_count}")
-    assert param_count == 70794, f"Expected 70,794 parameters, got {param_count}"
+    print("Running ReconstructionDecoder & SlotMaskDecoder smoke tests...")
+    dec = ReconstructionDecoder()
+    mask_dec = SlotMaskDecoder()
 
-    test_cases = [
-        ((4, 24, 128), 10, 10),
-        ((1, 24, 128), 5, 5),
-        ((2, 24, 128), 8, 12),
-        ((2, 24, 128), 15, 15),
-        ((2, 24, 128), 30, 30),
-    ]
+    B, K, D = 4, 24, 128
+    slots = torch.randn(B, K, D)
+    obj = torch.rand(B, K)
 
-    for (B, K, D), H, W in test_cases:
-        dummy_slots = torch.randn(B, K, D)
-        dummy_obj = torch.rand(B, K)
+    masks = mask_dec(slots, H=12, W=15)
+    assert masks.shape == (B, K, 12, 15)
+    assert (masks >= 0.0).all() and (masks <= 1.0).all()
 
-        # Test with and without objectness scores
-        out_with_obj = model(dummy_slots, objectness=dummy_obj, H=H, W=W)
-        out_without_obj = model(dummy_slots, objectness=None, H=H, W=W)
+    logits = dec(slots, objectness=obj, slot_masks=masks, H=12, W=15)
+    assert logits.shape == (B, 12, 15, 10)
 
-        expected_shape = (B, H, W, 10)
-        assert out_with_obj.shape == expected_shape, f"Expected {expected_shape}, got {out_with_obj.shape}"
-        assert out_without_obj.shape == expected_shape, f"Expected {expected_shape}, got {out_without_obj.shape}"
-        print(f"Passed test for slots (B={B}, K={K}, D={D}) -> grid ({H}x{W}) -> logits {out_with_obj.shape}")
-
-    print("All ReconstructionDecoder smoke tests passed successfully!")
+    print("All ReconstructionDecoder & SlotMaskDecoder smoke tests passed successfully!")

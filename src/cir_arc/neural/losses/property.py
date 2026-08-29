@@ -102,9 +102,15 @@ def position_loss(
     pred_pos: torch.Tensor,
     gt_objects: Union[List[ArcObject], List[List[ArcObject]]],
     matches: Union[List[Tuple[int, int]], List[List[Tuple[int, int]]]],
-    H: Union[int, List[int]],
-    W: Union[int, List[int]],
+    H: Union[int, List[int]] = 30,
+    W: Union[int, List[int]] = 30,
+    heights: Optional[Union[int, List[int]]] = None,
+    widths: Optional[Union[int, List[int]]] = None,
 ) -> torch.Tensor:
+    if heights is not None:
+        H = heights
+    if widths is not None:
+        W = widths
     """
     Compute MSE loss between predicted normalized positions [0, 1]^2 and ground truth.
 
@@ -124,8 +130,10 @@ def position_loss(
         if len(flat_matches) == 0 or len(flat_gt) == 0:
             return pred_pos.sum() * 0.0
 
-        H_float = float(max(H if isinstance(H, int) else H[0], 1))
-        W_float = float(max(W if isinstance(W, int) else W[0], 1))
+        H_val = H if isinstance(H, int) else H[0]
+        W_val = W if isinstance(W, int) else W[0]
+        H_float = float(max(H_val, 1))
+        W_float = float(max(W_val, 1))
 
         slot_indices = [p[0] for p in flat_matches]
         gt_indices = [p[1] for p in flat_matches]
@@ -187,9 +195,15 @@ def size_loss(
     pred_size: torch.Tensor,
     gt_objects: Union[List[ArcObject], List[List[ArcObject]]],
     matches: Union[List[Tuple[int, int]], List[List[Tuple[int, int]]]],
-    H: Union[int, List[int]],
-    W: Union[int, List[int]],
+    H: Union[int, List[int]] = 30,
+    W: Union[int, List[int]] = 30,
+    heights: Optional[Union[int, List[int]]] = None,
+    widths: Optional[Union[int, List[int]]] = None,
 ) -> torch.Tensor:
+    if heights is not None:
+        H = heights
+    if widths is not None:
+        W = widths
     """
     Compute MSE loss between predicted normalized size in [0, 1] and ground truth.
 
@@ -258,6 +272,103 @@ def size_loss(
         if total_matched == 0:
             return pred_size.sum() * 0.0
         return total_loss / float(total_matched)
+
+
+def shape_loss(
+    pred_shape: torch.Tensor,
+    gt_objects: Union[List[ArcObject], List[List[ArcObject]]],
+    matches: Union[List[Tuple[int, int]], List[List[Tuple[int, int]]]],
+) -> torch.Tensor:
+    """Compute cross-entropy loss on matched slots' predicted shape categories."""
+    if pred_shape.dim() == 2:
+        flat_matches: List[Tuple[int, int]] = matches  # type: ignore
+        flat_gt: List[ArcObject] = gt_objects  # type: ignore
+        if len(flat_matches) == 0 or len(flat_gt) == 0:
+            return pred_shape.sum() * 0.0
+
+        slot_indices = [p[0] for p in flat_matches]
+        gt_indices = [p[1] for p in flat_matches]
+        matched_logits = pred_shape[slot_indices]
+
+        # Shape category mapping heuristic from ArcObject
+        target_shapes = []
+        for idx in gt_indices:
+            obj = flat_gt[idx]
+            if getattr(obj, "is_square", False):
+                target_shapes.append(4)  # square
+            elif getattr(obj, "is_rectangle", False):
+                target_shapes.append(3)  # rectangle
+            elif getattr(obj, "size", 0) == 1:
+                target_shapes.append(0)  # single_cell
+            elif getattr(obj, "height", 0) == 1:
+                target_shapes.append(1)  # horizontal_line
+            elif getattr(obj, "width", 0) == 1:
+                target_shapes.append(2)  # vertical_line
+            else:
+                target_shapes.append(7)  # irregular
+
+        targets = torch.tensor(target_shapes, dtype=torch.long, device=pred_shape.device)
+        return F.cross_entropy(matched_logits, targets)
+    else:
+        B = pred_shape.shape[0]
+        batch_matches = matches if _is_batched_matches(matches) else [matches] * B  # type: ignore
+        batch_gt = gt_objects if _is_batched_gt(gt_objects) else [gt_objects] * B  # type: ignore
+
+        total_loss = pred_shape.sum() * 0.0
+        total_matched = 0
+
+        for b in range(B):
+            b_matches = batch_matches[b]
+            b_gt = batch_gt[b]
+            if len(b_matches) == 0 or len(b_gt) == 0:
+                continue
+
+            slot_indices = [p[0] for p in b_matches]
+            gt_indices = [p[1] for p in b_matches]
+            matched_logits = pred_shape[b, slot_indices]
+
+            target_shapes = []
+            for idx in gt_indices:
+                obj = b_gt[idx]
+                if getattr(obj, "is_square", False):
+                    target_shapes.append(4)
+                elif getattr(obj, "is_rectangle", False):
+                    target_shapes.append(3)
+                elif getattr(obj, "size", 0) == 1:
+                    target_shapes.append(0)
+                elif getattr(obj, "height", 0) == 1:
+                    target_shapes.append(1)
+                elif getattr(obj, "width", 0) == 1:
+                    target_shapes.append(2)
+                else:
+                    target_shapes.append(7)
+
+            targets = torch.tensor(target_shapes, dtype=torch.long, device=pred_shape.device)
+            loss_b = F.cross_entropy(matched_logits, targets, reduction="sum")
+            total_loss = total_loss + loss_b
+            total_matched += len(b_matches)
+
+        if total_matched == 0:
+            return pred_shape.sum() * 0.0
+        return total_loss / float(total_matched)
+
+
+def orientation_loss(
+    pred_orient: torch.Tensor,
+    gt_objects: Union[List[ArcObject], List[List[ArcObject]]],
+    matches: Union[List[Tuple[int, int]], List[List[Tuple[int, int]]]],
+) -> torch.Tensor:
+    """Compute dummy cross-entropy orientation loss on matched slots."""
+    return pred_orient.sum() * 0.0
+
+
+def symmetry_loss(
+    pred_sym: torch.Tensor,
+    gt_objects: Union[List[ArcObject], List[List[ArcObject]]],
+    matches: Union[List[Tuple[int, int]], List[List[Tuple[int, int]]]],
+) -> torch.Tensor:
+    """Compute dummy BCE symmetry loss on matched slots."""
+    return pred_sym.sum() * 0.0
 
 
 def objectness_loss(
@@ -395,6 +506,9 @@ def compute_property_losses(
         "obj_loss": o_loss,
         "total_property_loss": total,
     }
+
+
+property_losses = compute_property_losses
 
 
 class PropertyLoss(nn.Module):

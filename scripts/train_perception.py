@@ -155,6 +155,8 @@ def main():
         n_slots=model_cfg.get("n_slots", 24),
         slot_dim=model_cfg.get("slot_dim", 128),
         n_iter=model_cfg.get("n_iter", 3),
+        relation_layers=model_cfg.get("relation_layers", 2),
+        relation_heads=model_cfg.get("relation_heads", 4),
         prop_hidden_dim=model_cfg.get("prop_hidden_dim", 64),
         num_shapes=model_cfg.get("num_shapes", 8),
         num_orientations=model_cfg.get("num_orientations", 4),
