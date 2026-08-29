@@ -41,7 +41,7 @@ def slot_mask_loss(
         gt_objs = gt_objects_batch[b] if b < len(gt_objects_batch) else []
 
         for slot_idx, gt_idx in matches:
-            if gt_idx >= len(gt_objs):
+            if gt_idx >= len(gt_objs) or slot_idx >= K:
                 continue
 
             gt_obj = gt_objs[gt_idx]
@@ -56,7 +56,9 @@ def slot_mask_loss(
                 if valid.any():
                     gt_mask[rows[valid], cols[valid]] = 1.0
 
-            p_mask = pred_masks[b, slot_idx].clamp(min=1e-6, max=1.0 - 1e-6)
+            gt_mask = torch.nan_to_num(gt_mask, nan=0.0, posinf=1.0, neginf=0.0).clamp(min=0.0, max=1.0)
+            p_mask = pred_masks[b, slot_idx]
+            p_mask = torch.nan_to_num(p_mask, nan=0.5, posinf=1.0 - eps, neginf=eps).clamp(min=eps, max=1.0 - eps)
 
             # 1. Binary Cross-Entropy
             bce = - (gt_mask * torch.log(p_mask) + (1.0 - gt_mask) * torch.log(1.0 - p_mask)).mean()
@@ -83,8 +85,8 @@ def mask_exclusivity_loss(
     """Penalizes spatial overlap between distinct active slot masks.
 
     Args:
-        pred_masks: Predicted per-slot masks of shape (B, K, H, W) in [0, 1].
-        objectness: Optional slot objectness scores of shape (B, K) in [0, 1].
+        pred_masks: Predicted masks of shape (B, K, H, W) in [0, 1].
+        objectness: Optional slot objectness scores of shape (B, K).
         eps: Small epsilon for numerical stability.
 
     Returns:
@@ -92,17 +94,24 @@ def mask_exclusivity_loss(
     """
     B, K, H, W = pred_masks.shape
     if K <= 1:
-        return torch.tensor(0.0, device=pred_masks.device, dtype=pred_masks.dtype)
+        return pred_masks.sum() * 0.0
 
-    masks = pred_masks  # (B, K, H, W)
+    masks = torch.nan_to_num(pred_masks, nan=0.0, posinf=1.0, neginf=0.0).clamp(min=0.0, max=1.0)
+
+    # Flatten spatial dimensions: (B, K, H*W)
+    flat_masks = masks.reshape(B, K, H * W)
+
+    # Weight masks by objectness confidence if provided
     if objectness is not None:
-        # Scale masks by slot objectness
-        obj_unsq = objectness.unsqueeze(-1).unsqueeze(-1)  # (B, K, 1, 1)
-        masks = masks * obj_unsq
+        obj_w = torch.nan_to_num(objectness, nan=0.0, posinf=1.0, neginf=0.0).clamp(min=0.0, max=1.0)
+        flat_masks = flat_masks * obj_w.unsqueeze(-1)
 
-    # Sum of pairwise overlaps: sum_{i != j} M_i * M_j = (sum_k M_k)^2 - sum_k M_k^2
-    mask_sum = masks.sum(dim=1)             # (B, H, W)
-    mask_sq_sum = (masks ** 2).sum(dim=1)   # (B, H, W)
+    # Compute pairwise spatial overlap matrix: (B, K, K)
+    overlap = torch.bmm(flat_masks, flat_masks.transpose(1, 2))  # (B, K, K)
 
-    overlap = F.relu(mask_sum ** 2 - mask_sq_sum)  # (B, H, W)
-    return overlap.mean()
+    # Mask out diagonal (self-overlap)
+    eye = torch.eye(K, device=pred_masks.device, dtype=torch.bool).unsqueeze(0)
+    off_diag_overlap = overlap.masked_fill(eye, 0.0)
+
+    num_pairs = float(B * K * (K - 1))
+    return off_diag_overlap.sum() / (num_pairs * H * W + eps)

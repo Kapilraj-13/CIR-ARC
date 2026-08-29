@@ -17,7 +17,7 @@ def boundary_loss(
     target_boundary: torch.Tensor,
     mask: Optional[torch.Tensor] = None,
     pos_weight: float = 2.0,
-    eps: float = 1e-8,
+    eps: float = 1e-7,
 ) -> torch.Tensor:
     """Binary cross-entropy loss for spatial object boundary prediction.
 
@@ -41,8 +41,9 @@ def boundary_loss(
     else:
         target = target_boundary.float()
 
-    # Numerical clamp
-    pred = pred.clamp(min=eps, max=1.0 - eps)
+    # Numerical sanitization and clamp
+    pred = torch.nan_to_num(pred, nan=0.5, posinf=1.0 - eps, neginf=eps).clamp(min=eps, max=1.0 - eps)
+    target = torch.nan_to_num(target, nan=0.0, posinf=1.0, neginf=0.0).clamp(min=0.0, max=1.0)
 
     # Weighted BCE
     bce = - (pos_weight * target * torch.log(pred) + (1.0 - target) * torch.log(1.0 - pred))
@@ -52,6 +53,7 @@ def boundary_loss(
             m = mask.squeeze(1).float()
         else:
             m = mask.float()
+        m = torch.nan_to_num(m, nan=0.0, posinf=1.0, neginf=0.0)
         bce = bce * m
         return bce.sum() / (m.sum() + eps)
 
@@ -62,7 +64,7 @@ def cell_objectness_loss(
     pred_objectness: torch.Tensor,
     target_objectness: torch.Tensor,
     mask: Optional[torch.Tensor] = None,
-    eps: float = 1e-8,
+    eps: float = 1e-7,
 ) -> torch.Tensor:
     """Binary cross-entropy loss for cell-level foreground objectness prediction.
 
@@ -85,7 +87,8 @@ def cell_objectness_loss(
     else:
         target = target_objectness.float()
 
-    pred = pred.clamp(min=eps, max=1.0 - eps)
+    pred = torch.nan_to_num(pred, nan=0.5, posinf=1.0 - eps, neginf=eps).clamp(min=eps, max=1.0 - eps)
+    target = torch.nan_to_num(target, nan=0.0, posinf=1.0, neginf=0.0).clamp(min=0.0, max=1.0)
     bce = - (target * torch.log(pred) + (1.0 - target) * torch.log(1.0 - pred))
 
     if mask is not None:
@@ -93,6 +96,7 @@ def cell_objectness_loss(
             m = mask.squeeze(1).float()
         else:
             m = mask.float()
+        m = torch.nan_to_num(m, nan=0.0, posinf=1.0, neginf=0.0)
         bce = bce * m
         return bce.sum() / (m.sum() + eps)
 

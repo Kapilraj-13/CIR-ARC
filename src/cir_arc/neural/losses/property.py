@@ -371,6 +371,12 @@ def symmetry_loss(
     return pred_sym.sum() * 0.0
 
 
+def _safe_binary_cross_entropy(pred: torch.Tensor, target: torch.Tensor, eps: float = 1e-7) -> torch.Tensor:
+    p = torch.nan_to_num(pred, nan=0.5, posinf=1.0 - eps, neginf=eps).clamp(min=eps, max=1.0 - eps)
+    t = torch.nan_to_num(target, nan=0.0, posinf=1.0, neginf=0.0).clamp(min=0.0, max=1.0)
+    return - (t * torch.log(p) + (1.0 - t) * torch.log(1.0 - p)).mean()
+
+
 def objectness_loss(
     objectness: torch.Tensor,
     matches: Union[List[Tuple[int, int]], List[List[Tuple[int, int]]]],
@@ -395,8 +401,7 @@ def objectness_loss(
         for slot_idx, _ in flat_matches:
             if 0 <= slot_idx < K:
                 target[slot_idx] = 1.0
-        clamped_obj = objectness.clamp(min=1e-7, max=1.0 - 1e-7)
-        return F.binary_cross_entropy(clamped_obj, target)
+        return _safe_binary_cross_entropy(objectness, target)
 
     elif objectness.dim() == 2 and objectness.shape[1] == 1 and not _is_batched_matches(matches):
         K = total_slots if total_slots is not None else objectness.shape[0]
@@ -404,8 +409,7 @@ def objectness_loss(
         for slot_idx, _ in flat_matches:
             if 0 <= slot_idx < K:
                 target[slot_idx, 0] = 1.0
-        clamped_obj = objectness.clamp(min=1e-7, max=1.0 - 1e-7)
-        return F.binary_cross_entropy(clamped_obj, target)
+        return _safe_binary_cross_entropy(objectness, target)
 
     elif objectness.dim() == 2:
         # Batched (B, K)
@@ -426,8 +430,7 @@ def objectness_loss(
                         target[0, slot_idx] = 1.0
                     else:
                         target[:, slot_idx] = 1.0
-        clamped_obj = objectness.clamp(min=1e-7, max=1.0 - 1e-7)
-        return F.binary_cross_entropy(clamped_obj, target)
+        return _safe_binary_cross_entropy(objectness, target)
 
     elif objectness.dim() == 3:
         # Batched (B, K, 1)
@@ -448,8 +451,7 @@ def objectness_loss(
                         target[0, slot_idx, 0] = 1.0
                     else:
                         target[:, slot_idx, 0] = 1.0
-        clamped_obj = objectness.clamp(min=1e-7, max=1.0 - 1e-7)
-        return F.binary_cross_entropy(clamped_obj, target)
+        return _safe_binary_cross_entropy(objectness, target)
 
     else:
         raise ValueError(f"Unexpected objectness tensor shape: {objectness.shape}")

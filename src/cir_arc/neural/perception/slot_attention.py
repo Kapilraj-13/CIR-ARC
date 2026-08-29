@@ -118,6 +118,7 @@ class SlotAttention(nn.Module):
 
         # Extract top-K objectness feature vectors
         obj_flat = cell_objectness.reshape(B, N) if cell_objectness.dim() > 2 else cell_objectness
+        obj_flat = torch.nan_to_num(obj_flat, nan=0.0, posinf=1.0, neginf=0.0).clamp(min=0.0, max=1.0)
         K = min(self.n_slots, N)
         _, topk_indices = torch.topk(obj_flat, k=K, dim=-1)
 
