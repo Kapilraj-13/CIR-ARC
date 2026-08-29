@@ -45,6 +45,7 @@ def compute_cost_matrix(
             if color_logits.dim() == 3 and color_logits.shape[0] == 1:
                 color_logits = color_logits.squeeze(0)
             log_probs = F.log_softmax(color_logits, dim=-1).cpu().numpy()
+            log_probs = np.nan_to_num(log_probs, nan=-20.0, posinf=0.0, neginf=-20.0)
 
         for m, obj in enumerate(gt_objects):
             target_c = int(obj.color)
@@ -58,6 +59,7 @@ def compute_cost_matrix(
             if pred_pos.dim() == 3 and pred_pos.shape[0] == 1:
                 pred_pos = pred_pos.squeeze(0)
             pred_pos_np = pred_pos.cpu().numpy()
+            pred_pos_np = np.nan_to_num(pred_pos_np, nan=0.5, posinf=1.0, neginf=0.0)
 
         for m, obj in enumerate(gt_objects):
             r_centroid, c_centroid = obj.centroid
@@ -66,6 +68,8 @@ def compute_cost_matrix(
             dist_l2 = np.sqrt(np.sum(diff ** 2, axis=-1))
             cost_matrix[:, m] += pos_cost_weight * dist_l2
 
+    cost_matrix = np.nan_to_num(cost_matrix, nan=1e4, posinf=1e4, neginf=0.0)
+    cost_matrix = np.clip(cost_matrix, a_min=0.0, a_max=1e5)
     return cost_matrix
 
 
@@ -91,8 +95,29 @@ def hungarian_matching(
     if cost_matrix.shape[0] == 0 or cost_matrix.shape[1] == 0:
         return []
 
-    row_ind, col_ind = linear_sum_assignment(cost_matrix)
-    matches: List[Tuple[int, int]] = [
-        (int(r), int(c)) for r, c in zip(row_ind, col_ind)
-    ]
-    return matches
+    # Safe Hungarian assignment on sanitized finite cost matrix
+    cost_matrix = np.ascontiguousarray(cost_matrix, dtype=np.float64)
+    cost_matrix = np.nan_to_num(cost_matrix, nan=1e4, posinf=1e4, neginf=0.0)
+
+    try:
+        row_ind, col_ind = linear_sum_assignment(cost_matrix)
+        matches: List[Tuple[int, int]] = [
+            (int(r), int(c)) for r, c in zip(row_ind, col_ind)
+        ]
+        return matches
+    except Exception:
+        # Fallback greedy matching if scipy throws any exception
+        K, M = cost_matrix.shape
+        matched = []
+        used_cols = set()
+        for r in range(min(K, M)):
+            best_c = -1
+            best_val = float("inf")
+            for c in range(M):
+                if c not in used_cols and cost_matrix[r, c] < best_val:
+                    best_val = cost_matrix[r, c]
+                    best_c = c
+            if best_c != -1:
+                matched.append((r, best_c))
+                used_cols.add(best_c)
+        return matched

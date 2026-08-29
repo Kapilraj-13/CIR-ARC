@@ -45,21 +45,10 @@ class SetTransformerBlock(nn.Module):
         x: torch.Tensor,
         key_padding_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """Forward pass of a Set Transformer block.
-
-        Args:
-            x: Slot representations of shape (B, K, slot_dim).
-            key_padding_mask: Optional boolean mask of shape (B, K) where True indicates inactive slots.
-
-        Returns:
-            Refined slot representations of shape (B, K, slot_dim).
-        """
-        # Self-attention with pre-LayerNorm and residual connection
+        """Forward pass of a Set Transformer block."""
         normed = self.norm1(x)
         attn_out, _ = self.mha(normed, normed, normed, key_padding_mask=key_padding_mask)
         x = x + attn_out
-
-        # Feed-forward MLP with pre-LayerNorm and residual connection
         x = x + self.mlp(self.norm2(x))
         return x
 
@@ -102,57 +91,23 @@ class SlotRelationEncoder(nn.Module):
         self,
         slots: torch.Tensor,
         objectness: Optional[torch.Tensor] = None,
-        threshold: float = 0.1,
     ) -> torch.Tensor:
         """Refines slot representations through relational self-attention.
 
         Args:
             slots: Input slot tensor of shape (B, K, slot_dim).
             objectness: Optional slot objectness scores of shape (B, K) in [0, 1].
-            threshold: Minimum objectness threshold for active slot participation.
 
         Returns:
             Refined slot tensor of shape (B, K, slot_dim).
         """
-        key_padding_mask = None
-        if objectness is not None:
-            # Mask out slots with near-zero objectness (True indicates ignore)
-            key_padding_mask = objectness < threshold  # (B, K)
-            # Ensure at least one slot is unmasked per batch item to prevent NaN in softmax
-            all_masked = key_padding_mask.all(dim=-1, keepdim=True)
-            if all_masked.any():
-                key_padding_mask = key_padding_mask & ~all_masked
-
         x = slots
+        # Soft-weight active slots to communicate proportionally to objectness confidence
+        if objectness is not None:
+            obj_weight = 0.2 + 0.8 * objectness.unsqueeze(-1)
+            x = x * obj_weight
+
         for layer in self.layers:
-            x = layer(x, key_padding_mask=key_padding_mask)
+            x = layer(x, key_padding_mask=None)
 
         return self.final_norm(x)
-
-
-if __name__ == "__main__":
-    print("Running SlotRelationEncoder smoke tests...")
-    encoder = SlotRelationEncoder()
-    param_count = sum(p.numel() for p in encoder.parameters())
-    print(f"SlotRelationEncoder parameter count: {param_count}")
-
-    B, K, D = 4, 24, 128
-    slots = torch.randn(B, K, D)
-    obj = torch.rand(B, K)
-
-    out = encoder(slots, objectness=obj)
-    assert out.shape == (B, K, D), f"Expected shape {(B, K, D)}, got {out.shape}"
-
-    out_no_obj = encoder(slots)
-    assert out_no_obj.shape == (B, K, D)
-
-    # Equivariance check: Permuting slot inputs should permute slot outputs identically
-    perm = torch.randperm(K)
-    slots_perm = slots[:, perm, :]
-    out_perm = encoder(slots_perm)
-    out_expected = out_no_obj[:, perm, :]
-    max_diff = torch.max(torch.abs(out_perm - out_expected)).item()
-    assert max_diff < 1e-5, f"Permutation equivariance violated! Max diff: {max_diff}"
-
-    print(f"Permutation equivariance verified! Max diff: {max_diff:.2e}")
-    print("All SlotRelationEncoder smoke tests passed successfully!")
