@@ -70,6 +70,10 @@ class Action:
         )
 
     @classmethod
+    def from_int(cls, action_id: int, data: Optional[Dict[str, Any]] = None, reasoning: Optional[Dict[str, Any]] = None) -> Action:
+        return cls.from_id(action_id, data=data, reasoning=reasoning)
+
+    @classmethod
     def click(cls, x: int, y: int, extra: Optional[Dict[str, Any]] = None) -> Action:
         payload = {"x": x, "y": y}
         if extra:
