@@ -26,7 +26,7 @@ training:
   weight_decay: 0.0001
   clip_grad_norm: 1.0
   batch_size: 16
-  epochs: 50
+  epochs: 30
   num_workers: 0          # Windows multiprocessing safety
   seed: 42
   device: "cuda"
@@ -37,10 +37,10 @@ loss_weights:
   pos_weight: 1.0         # Hungarian-matched object centroid MSE
   size_weight: 1.0        # Hungarian-matched object normalized area MSE
   shape_weight: 0.5       # Hungarian-matched object categorical shape CE
-  obj_weight: 0.5         # Slot objectness binary cross-entropy
-  bound_weight: 0.5       # Spatial boundary map binary cross-entropy
-  cell_obj_weight: 0.5    # Cell-level foreground objectness BCE
-  mask_weight: 0.5        # Hungarian-matched per-slot spatial mask BCE + Dice
+  obj_weight: 1.5         # Boosted slot objectness focal BCE (prevents false negatives)
+  bound_weight: 0.8       # Spatial boundary map binary cross-entropy
+  cell_obj_weight: 0.8    # Cell-level foreground objectness BCE
+  mask_weight: 1.0        # Hungarian-matched per-slot spatial mask BCE + Dice
   excl_weight: 0.05       # Mask spatial exclusivity penalty
   div_weight: 0.01        # Slot cosine diversity penalty
   sparse_weight: 0.01     # Objectness L1 sparsity regularization

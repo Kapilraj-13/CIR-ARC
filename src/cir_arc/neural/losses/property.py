@@ -371,10 +371,18 @@ def symmetry_loss(
     return pred_sym.sum() * 0.0
 
 
-def _safe_binary_cross_entropy(pred: torch.Tensor, target: torch.Tensor, eps: float = 1e-7) -> torch.Tensor:
+def _safe_binary_cross_entropy(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    pos_weight: float = 2.5,
+    gamma: float = 1.0,
+    eps: float = 1e-7,
+) -> torch.Tensor:
     p = torch.nan_to_num(pred, nan=0.5, posinf=1.0 - eps, neginf=eps).clamp(min=eps, max=1.0 - eps)
     t = torch.nan_to_num(target, nan=0.0, posinf=1.0, neginf=0.0).clamp(min=0.0, max=1.0)
-    return - (t * torch.log(p) + (1.0 - t) * torch.log(1.0 - p)).mean()
+    pos_loss = pos_weight * t * ((1.0 - p) ** gamma) * torch.log(p)
+    neg_loss = (1.0 - t) * (p ** gamma) * torch.log(1.0 - p)
+    return - (pos_loss + neg_loss).mean()
 
 
 def objectness_loss(

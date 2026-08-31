@@ -293,9 +293,20 @@ class Trainer:
         self.cell_obj_weight = float(weights_cfg.get("cell_obj_weight", 0.5))
         self.mask_weight = float(weights_cfg.get("mask_weight", 0.5))
         self.excl_weight = float(weights_cfg.get("excl_weight", 0.05))
+        total_epochs = int(self.config.get("training", {}).get("epochs", 30))
+        self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            self.optimizer,
+            T_max=max(total_epochs, 1),
+            eta_min=1e-5,
+        )
 
         self.step = 0
         self.epoch = 0
+
+    def step_scheduler(self) -> float:
+        """Advance learning rate scheduler and return current learning rate."""
+        self.scheduler.step()
+        return self.optimizer.param_groups[0]["lr"]
 
     def train_step(self, batch: Dict[str, Any]) -> Dict[str, float]:
         """Perform a single training step across all multi-objective perception losses.

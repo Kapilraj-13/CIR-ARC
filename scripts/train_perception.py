@@ -197,6 +197,9 @@ def main():
                 best_path = checkpoint_dir / "best_model.pt"
                 trainer.save_checkpoint(str(best_path))
 
+        current_lr = trainer.step_scheduler()
+        log_str += f" | LR: {current_lr:.5f}"
+
         print(log_str)
 
         # Periodic save
