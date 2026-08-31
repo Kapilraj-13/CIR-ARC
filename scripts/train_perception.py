@@ -119,10 +119,21 @@ def main():
                 t.save(out_p / f"{t.task_id}.json")
 
     train_ds = SyntheticArcDataset(data_dir=train_dir)
-    val_ds = SyntheticArcDataset(data_dir=held_out_dir) if os.path.exists(held_out_dir) else None
+    val_ds = SyntheticArcDataset(data_dir=held_out_dir) if (os.path.exists(held_out_dir) and len(os.listdir(held_out_dir)) > 0) else None
 
-    print(f"Loaded {len(train_ds)} training examples.")
-    if val_ds:
+    if val_ds is None or len(val_ds) == 0:
+        # Automatically split 20% of train_ds for validation so validation metrics are ALWAYS evaluated
+        if len(train_ds) > 10:
+            val_size = max(int(0.2 * len(train_ds)), 1)
+            train_size = len(train_ds) - val_size
+            train_ds, val_ds = torch.utils.data.random_split(
+                train_ds, [train_size, val_size], generator=torch.Generator().manual_seed(42)
+            )
+            print(f"Dataset split: {train_size} train, {val_size} validation examples.")
+        else:
+            print(f"Loaded {len(train_ds)} training examples.")
+    else:
+        print(f"Loaded {len(train_ds)} training examples.")
         print(f"Loaded {len(val_ds)} validation examples.")
 
     batch_size = config.get("training", {}).get("batch_size", 16)
@@ -143,7 +154,7 @@ def main():
             collate_fn=collate_variable_grids,
             num_workers=num_workers,
         )
-        if val_ds and len(val_ds) > 0
+        if val_ds is not None and len(val_ds) > 0
         else None
     )
 
