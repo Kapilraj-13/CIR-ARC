@@ -10,6 +10,8 @@ from cir_arc.neural.losses.property import (
     orientation_loss,
     symmetry_loss,
     objectness_loss,
+    bbox_loss,
+    dimensions_loss,
     compute_property_losses,
     PropertyLoss,
 )
@@ -26,6 +28,8 @@ from cir_arc.neural.losses.mask import (
     slot_mask_loss,
     mask_exclusivity_loss,
 )
+from cir_arc.neural.losses.relation import relation_loss
+from cir_arc.neural.losses.identity import object_identity_contrastive_loss
 
 __all__ = [
     "hungarian_matching",
@@ -38,6 +42,8 @@ __all__ = [
     "orientation_loss",
     "symmetry_loss",
     "objectness_loss",
+    "bbox_loss",
+    "dimensions_loss",
     "compute_property_losses",
     "PropertyLoss",
     "slot_diversity_loss",
@@ -47,4 +53,6 @@ __all__ = [
     "cell_objectness_loss",
     "slot_mask_loss",
     "mask_exclusivity_loss",
+    "relation_loss",
+    "object_identity_contrastive_loss",
 ]

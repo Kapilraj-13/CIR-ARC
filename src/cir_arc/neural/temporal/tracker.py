@@ -262,3 +262,87 @@ class TemporalSlotTracker:
                 matched_tracks.append(slot_obj)
 
         return matched_tracks
+
+    def update_from_world_state(self, world_state: Any) -> "TemporalWorldState":
+        """Update tracker directly from a Phase 2.5 WorldState instance."""
+        objects = getattr(world_state, "objects", [])
+        H, W = getattr(world_state, "grid_shape", (30, 30))
+
+        if not objects:
+            return TemporalWorldState(
+                frame_index=getattr(world_state, "frame_index", self.step_count),
+                world_state=world_state,
+                tracked_objects=[],
+                object_velocities={},
+                object_directions={},
+                state_changes={},
+            )
+
+        K = len(objects)
+        slots_list = []
+        obj_scores = []
+        colors = []
+        pos_list = []
+        shape_list = []
+        size_list = []
+
+        for obj in objects:
+            v = obj.raw_slot_vector if obj.raw_slot_vector is not None else np.zeros(self.slot_dim, dtype=np.float32)
+            slots_list.append(torch.from_numpy(v).float())
+            obj_scores.append(obj.confidence)
+            colors.append(obj.color)
+            pos_list.append(obj.centroid)
+            shape_list.append(obj.shape_class)
+            size_list.append([obj.area])
+
+        slots_t = torch.stack(slots_list)
+        obj_t = torch.tensor(obj_scores, dtype=torch.float32)
+        pos_t = torch.tensor(pos_list, dtype=torch.float32)
+        shape_t = torch.zeros((K, 8), dtype=torch.float32)
+        for i, s_id in enumerate(shape_list):
+            if 0 <= s_id < 8:
+                shape_t[i, s_id] = 1.0
+        size_t = torch.tensor(size_list, dtype=torch.float32)
+
+        tracked = self.update_from_perception(
+            slots=slots_t,
+            objectness=obj_t,
+            H=H,
+            W=W,
+            pos_preds=pos_t,
+            shape_preds=shape_t,
+            size_preds=size_t,
+        )
+
+        velocities = {t.track_id: t.velocity for t in tracked}
+        directions = {t.track_id: t.motion_direction for t in tracked}
+        states = {t.track_id: t.lifecycle_state for t in tracked}
+
+        return TemporalWorldState(
+            frame_index=getattr(world_state, "frame_index", self.step_count),
+            world_state=world_state,
+            tracked_objects=tracked,
+            object_velocities=velocities,
+            object_directions=directions,
+            state_changes=states,
+        )
+
+
+@dataclass
+class TemporalWorldState:
+    """Combines spatial WorldState with temporal kinematics, velocities, and tracking IDs."""
+    frame_index: int
+    world_state: Any
+    tracked_objects: List[TrackedSlot]
+    object_velocities: Dict[int, Tuple[float, float]]
+    object_directions: Dict[int, str]
+    state_changes: Dict[int, str]
+
+    def summary(self) -> Dict[str, Any]:
+        return {
+            "frame_index": self.frame_index,
+            "tracked_objects_count": len(self.tracked_objects),
+            "moving_objects": [t.track_id for t in self.tracked_objects if t.motion_direction != "STILL"],
+            "velocities": self.object_velocities,
+            "directions": self.object_directions,
+        }

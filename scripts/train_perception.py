@@ -68,6 +68,8 @@ def evaluate(model: PerceptionModel, val_loader: DataLoader, device: torch.devic
                 mask=masks,
                 heights=heights,
                 widths=widths,
+                pred_masks=outputs.get("slot_masks"),
+                pred_relations=outputs.get("relation_logits"),
             )
 
             for k, v in metrics.items():
@@ -190,7 +192,9 @@ def main():
             recon_acc = val_metrics.get("recon_acc", 0.0)
             col_acc = val_metrics.get("color_acc", 0.0)
             pos_mae = val_metrics.get("pos_mae", 0.0)
-            log_str += f" | Val F1: {f1:.3f} | Recon Acc: {recon_acc:.3f} | Color Acc: {col_acc:.3f} | Pos MAE: {pos_mae:.3f}"
+            mask_iou_v = val_metrics.get("mask_iou", 0.0)
+            rel_acc_v = val_metrics.get("relation_acc", 0.0)
+            log_str += f" | Val F1: {f1:.3f} | Recon: {recon_acc:.3f} | Mask IoU: {mask_iou_v:.3f} | Rel Acc: {rel_acc_v:.3f} | Pos MAE: {pos_mae:.3f}"
 
             if f1 > best_f1:
                 best_f1 = f1

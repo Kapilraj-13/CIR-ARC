@@ -518,6 +518,120 @@ def compute_property_losses(
     }
 
 
+def bbox_loss(
+    pred_bbox: torch.Tensor,
+    gt_objects: Union[List[ArcObject], List[List[ArcObject]]],
+    matches: Union[List[Tuple[int, int]], List[List[Tuple[int, int]]]],
+    H: Union[int, List[int]] = 30,
+    W: Union[int, List[int]] = 30,
+) -> torch.Tensor:
+    """Computes Smooth L1 loss on normalized bounding boxes for matched slots."""
+    device = pred_bbox.device
+    if pred_bbox.dim() == 2:
+        pred_bbox = pred_bbox.unsqueeze(0)
+    B, K, _ = pred_bbox.shape
+
+    matched_preds = []
+    matched_targets = []
+
+    if _is_batched_matches(matches):
+        for b in range(min(B, len(matches))):
+            h_val = float(H[b] if isinstance(H, list) else H)
+            w_val = float(W[b] if isinstance(W, list) else W)
+            objs = gt_objects[b] if b < len(gt_objects) else []
+            for slot_idx, gt_idx in matches[b]:
+                if slot_idx < K and gt_idx < len(objs):
+                    obj = objs[gt_idx]
+                    min_r, min_c, max_r, max_c = obj.bounding_box
+                    tgt = torch.tensor(
+                        [min_r / h_val, min_c / w_val, (max_r + 1) / h_val, (max_c + 1) / w_val],
+                        dtype=torch.float32,
+                        device=device,
+                    )
+                    matched_preds.append(pred_bbox[b, slot_idx])
+                    matched_targets.append(tgt)
+    else:
+        h_val = float(H[0] if isinstance(H, list) else H)
+        w_val = float(W[0] if isinstance(W, list) else W)
+        objs = gt_objects
+        for slot_idx, gt_idx in matches:  # type: ignore
+            if slot_idx < K and gt_idx < len(objs):  # type: ignore
+                obj = objs[gt_idx]  # type: ignore
+                min_r, min_c, max_r, max_c = obj.bounding_box
+                tgt = torch.tensor(
+                    [min_r / h_val, min_c / w_val, (max_r + 1) / h_val, (max_c + 1) / w_val],
+                    dtype=torch.float32,
+                    device=device,
+                )
+                matched_preds.append(pred_bbox[0, slot_idx])
+                matched_targets.append(tgt)
+
+    if not matched_preds:
+        return torch.tensor(0.0, device=device, requires_grad=True)
+
+    preds_t = torch.stack(matched_preds)
+    targets_t = torch.stack(matched_targets)
+    return F.smooth_l1_loss(preds_t, targets_t)
+
+
+def dimensions_loss(
+    pred_dims: torch.Tensor,
+    gt_objects: Union[List[ArcObject], List[List[ArcObject]]],
+    matches: Union[List[Tuple[int, int]], List[List[Tuple[int, int]]]],
+    H: Union[int, List[int]] = 30,
+    W: Union[int, List[int]] = 30,
+) -> torch.Tensor:
+    """Computes MSE loss on normalized dimensions (width, height, area, perimeter) for matched slots."""
+    device = pred_dims.device
+    if pred_dims.dim() == 2:
+        pred_dims = pred_dims.unsqueeze(0)
+    B, K, _ = pred_dims.shape
+
+    matched_preds = []
+    matched_targets = []
+
+    if _is_batched_matches(matches):
+        for b in range(min(B, len(matches))):
+            h_val = float(H[b] if isinstance(H, list) else H)
+            w_val = float(W[b] if isinstance(W, list) else W)
+            area_val = max(h_val * w_val, 1.0)
+            perim_val = max(2.0 * (h_val + w_val), 1.0)
+            objs = gt_objects[b] if b < len(gt_objects) else []
+            for slot_idx, gt_idx in matches[b]:
+                if slot_idx < K and gt_idx < len(objs):
+                    obj = objs[gt_idx]
+                    tgt = torch.tensor(
+                        [obj.width / w_val, obj.height / h_val, obj.size / area_val, (2.0 * (obj.width + obj.height)) / perim_val],
+                        dtype=torch.float32,
+                        device=device,
+                    )
+                    matched_preds.append(pred_dims[b, slot_idx])
+                    matched_targets.append(tgt)
+    else:
+        h_val = float(H[0] if isinstance(H, list) else H)
+        w_val = float(W[0] if isinstance(W, list) else W)
+        area_val = max(h_val * w_val, 1.0)
+        perim_val = max(2.0 * (h_val + w_val), 1.0)
+        objs = gt_objects
+        for slot_idx, gt_idx in matches:  # type: ignore
+            if slot_idx < K and gt_idx < len(objs):  # type: ignore
+                obj = objs[gt_idx]  # type: ignore
+                tgt = torch.tensor(
+                    [obj.width / w_val, obj.height / h_val, obj.size / area_val, (2.0 * (obj.width + obj.height)) / perim_val],
+                    dtype=torch.float32,
+                    device=device,
+                )
+                matched_preds.append(pred_dims[0, slot_idx])
+                matched_targets.append(tgt)
+
+    if not matched_preds:
+        return torch.tensor(0.0, device=device, requires_grad=True)
+
+    preds_t = torch.stack(matched_preds)
+    targets_t = torch.stack(matched_targets)
+    return F.mse_loss(preds_t, targets_t)
+
+
 property_losses = compute_property_losses
 
 

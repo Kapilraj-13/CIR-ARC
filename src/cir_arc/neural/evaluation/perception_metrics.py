@@ -418,6 +418,141 @@ def size_mae(
     return 0.0
 
 
+def mask_iou(
+    pred_masks: torch.Tensor,
+    gt_objects: List[Any],
+    matches: List[Tuple[int, int]],
+    threshold: float = 0.5,
+) -> float:
+    """Calculate mean Intersection-over-Union between predicted slot masks and ground-truth pixel sets."""
+    if len(matches) == 0:
+        return 1.0
+
+    masks_np = (pred_masks.detach().cpu().numpy() >= threshold) if isinstance(pred_masks, torch.Tensor) else (pred_masks >= threshold)
+    if masks_np.ndim == 4:
+        masks_np = masks_np[0]
+
+    ious = []
+    H, W = masks_np.shape[-2], masks_np.shape[-1]
+    for slot_idx, gt_idx in matches:
+        if slot_idx >= masks_np.shape[0] or gt_idx >= len(gt_objects):
+            continue
+        obj = gt_objects[gt_idx]
+        gt_mask = np.zeros((H, W), dtype=bool)
+        if hasattr(obj, "pixels"):
+            for r, c in obj.pixels:
+                if 0 <= r < H and 0 <= c < W:
+                    gt_mask[r, c] = True
+
+        pred_m = masks_np[slot_idx]
+        intersection = np.logical_and(pred_m, gt_mask).sum()
+        union = np.logical_or(pred_m, gt_mask).sum()
+        if union == 0:
+            ious.append(1.0)
+        else:
+            ious.append(float(intersection / union))
+
+    return float(np.mean(ious)) if ious else 1.0
+
+
+def bbox_iou(
+    pred_bboxes: torch.Tensor,
+    gt_objects: List[Any],
+    matches: List[Tuple[int, int]],
+    H: int = 30,
+    W: int = 30,
+) -> float:
+    """Calculate mean Bounding Box IoU between predicted and ground-truth bounding boxes."""
+    if len(matches) == 0:
+        return 1.0
+
+    bboxes_np = pred_bboxes.detach().cpu().numpy() if isinstance(pred_bboxes, torch.Tensor) else pred_bboxes
+    if bboxes_np.ndim == 3:
+        bboxes_np = bboxes_np[0]
+
+    ious = []
+    for slot_idx, gt_idx in matches:
+        if slot_idx >= bboxes_np.shape[0] or gt_idx >= len(gt_objects):
+            continue
+        obj = gt_objects[gt_idx]
+        min_r, min_c, max_r, max_c = obj.bounding_box
+        gt_box = np.array([min_r / float(H), min_c / float(W), (max_r + 1) / float(H), (max_c + 1) / float(W)])
+        pred_box = bboxes_np[slot_idx]
+
+        inter_r1 = max(pred_box[0], gt_box[0])
+        inter_c1 = max(pred_box[1], gt_box[1])
+        inter_r2 = min(pred_box[2], gt_box[2])
+        inter_c2 = min(pred_box[3], gt_box[3])
+
+        inter_area = max(0.0, inter_r2 - inter_r1) * max(0.0, inter_c2 - inter_c1)
+        pred_area = max(0.0, pred_box[2] - pred_box[0]) * max(0.0, pred_box[3] - pred_box[1])
+        gt_area = max(0.0, gt_box[2] - gt_box[0]) * max(0.0, gt_box[3] - gt_box[1])
+
+        union_area = pred_area + gt_area - inter_area
+        if union_area <= 0:
+            ious.append(1.0)
+        else:
+            ious.append(float(inter_area / union_area))
+
+    return float(np.mean(ious)) if ious else 1.0
+
+
+def relation_accuracy(
+    pred_rel_logits: torch.Tensor,
+    gt_objects: List[Any],
+    matches: List[Tuple[int, int]],
+    H: int = 30,
+    W: int = 30,
+    threshold: float = 0.5,
+) -> float:
+    """Calculate multi-label relation classification accuracy across all matched pairs."""
+    from cir_arc.neural.perception.relation_graph import extract_ground_truth_relations
+    if len(matches) <= 1 or len(gt_objects) <= 1:
+        return 1.0
+
+    gt_rel_mat = extract_ground_truth_relations(gt_objects, H=H, W=W)
+    probs = torch.sigmoid(pred_rel_logits).detach().cpu().numpy()
+    if probs.ndim == 4:
+        probs = probs[0]
+
+    correct = 0
+    total = 0
+    for slot_i, gt_u in matches:
+        for slot_j, gt_v in matches:
+            if slot_i == slot_j or gt_u == gt_v:
+                continue
+            pred_rels = (probs[slot_i, slot_j] >= threshold)
+            gt_rels = (gt_rel_mat[gt_u, gt_v] >= 0.5)
+            correct += int((pred_rels == gt_rels).sum())
+            total += len(gt_rels)
+
+    return float(correct / max(total, 1))
+
+
+def identity_contrastive_score(
+    pred_identities: torch.Tensor,
+    matches: List[Tuple[int, int]],
+) -> float:
+    """Calculate mean off-diagonal cosine distance (separation) between active object slots."""
+    if len(matches) <= 1:
+        return 1.0
+
+    ident = F.normalize(pred_identities.detach(), p=2, dim=-1)
+    if ident.dim() == 3:
+        ident = ident[0]
+
+    active_indices = [slot_i for slot_i, _ in matches if slot_i < ident.shape[0]]
+    if len(active_indices) <= 1:
+        return 1.0
+
+    sub_ident = ident[active_indices]
+    sim = torch.mm(sub_ident, sub_ident.t())
+    eye = torch.eye(len(active_indices), device=sim.device)
+    off_diag_sim = sim * (1.0 - eye)
+    mean_sim = float(off_diag_sim.sum().item() / (len(active_indices) * (len(active_indices) - 1)))
+    return float(1.0 - mean_sim)  # Separation score: higher is more distinct
+
+
 def compute_perception_metrics(
     pred_logits: torch.Tensor,
     target_grid: torch.Tensor,
@@ -428,47 +563,29 @@ def compute_perception_metrics(
     heights: Optional[List[int]] = None,
     widths: Optional[List[int]] = None,
     threshold: float = 0.5,
+    pred_masks: Optional[torch.Tensor] = None,
+    pred_relations: Optional[torch.Tensor] = None,
 ) -> Dict[str, float]:
-    """Aggregate all perception metrics into a structured summary dictionary.
-
-    Args:
-        pred_logits: Predicted reconstruction logits of shape (B, H, W, 10).
-        target_grid: Target ground-truth grid of shape (B, H, W).
-        objectness: Slot objectness probabilities of shape (B, K).
-        pred_props: Dict of predicted slot properties ('color', 'position', 'size').
-        gt_objects_batch: List of GT ArcObject lists per batch sample.
-        mask: Optional spatial validity mask of shape (B, H, W).
-        heights: List of actual grid heights per sample in batch.
-        widths: List of actual grid widths per sample in batch.
-        threshold: Detection threshold for slot objectness (default: 0.5).
-
-    Returns:
-        Dictionary containing:
-            - "recon_acc": float in [0.0, 1.0]
-            - "object_f1": float in [0.0, 1.0]
-            - "color_acc": float in [0.0, 1.0]
-            - "pos_mae": float in [0.0, 1.0]
-            - "size_mae": float in [0.0, 1.0]
-    """
-    # 1. Reconstruction accuracy
+    """Aggregate all perception metrics into a structured summary dictionary."""
     recon_acc = reconstruction_accuracy(pred_logits, target_grid, mask=mask)
 
-    # 2. Object detection F1
     gt_counts = [len(objs) for objs in gt_objects_batch]
     obj_f1 = object_detection_f1(objectness, gt_counts=gt_counts, threshold=threshold)
 
-    # 3. Matched property metrics across batch
     B = objectness.shape[0] if objectness.dim() > 1 else 1
     color_accs: List[float] = []
     pos_maes: List[float] = []
     size_maes: List[float] = []
+    mask_ious: List[float] = []
+    bbox_ious: List[float] = []
+    rel_accs: List[float] = []
+    ident_scores: List[float] = []
 
     for b in range(B):
         gt_objs = gt_objects_batch[b] if b < len(gt_objects_batch) else []
         H = heights[b] if (heights is not None and b < len(heights)) else target_grid.shape[-2]
         W = widths[b] if (widths is not None and b < len(widths)) else target_grid.shape[-1]
 
-        # Extract per-sample property tensors
         color_b = pred_props["color"][b] if pred_props["color"].dim() == 3 else pred_props["color"]
         pos_b = pred_props["position"][b] if pred_props["position"].dim() == 3 else pred_props["position"]
         size_b = pred_props["size"][b] if pred_props["size"].dim() == 3 else pred_props["size"]
@@ -484,17 +601,39 @@ def compute_perception_metrics(
             pos_maes.append(position_mae(pos_b, gt_objs, matches, H=H, W=W))
             size_maes.append(size_mae(size_b, gt_objs, matches, H=H, W=W))
 
-    mean_color_acc = float(np.mean(color_accs)) if color_accs else 1.0
-    mean_pos_mae = float(np.mean(pos_maes)) if pos_maes else 0.0
-    mean_size_mae = float(np.mean(size_maes)) if size_maes else 0.0
+            if pred_masks is not None:
+                mask_b = pred_masks[b] if pred_masks.dim() == 4 else pred_masks
+                mask_ious.append(mask_iou(mask_b, gt_objs, matches))
 
-    return {
+            if "bbox" in pred_props:
+                bbox_b = pred_props["bbox"][b] if pred_props["bbox"].dim() == 3 else pred_props["bbox"]
+                bbox_ious.append(bbox_iou(bbox_b, gt_objs, matches, H=H, W=W))
+
+            if pred_relations is not None:
+                rel_b = pred_relations[b] if pred_relations.dim() == 4 else pred_relations
+                rel_accs.append(relation_accuracy(rel_b, gt_objs, matches, H=H, W=W))
+
+            if "identity" in pred_props:
+                ident_b = pred_props["identity"][b] if pred_props["identity"].dim() == 3 else pred_props["identity"]
+                ident_scores.append(identity_contrastive_score(ident_b, matches))
+
+    res = {
         "recon_acc": float(recon_acc),
         "object_f1": float(obj_f1),
-        "color_acc": float(mean_color_acc),
-        "pos_mae": float(mean_pos_mae),
-        "size_mae": float(mean_size_mae),
+        "color_acc": float(np.mean(color_accs)) if color_accs else 1.0,
+        "pos_mae": float(np.mean(pos_maes)) if pos_maes else 0.0,
+        "size_mae": float(np.mean(size_maes)) if size_maes else 0.0,
     }
+    if mask_ious:
+        res["mask_iou"] = float(np.mean(mask_ious))
+    if bbox_ious:
+        res["bbox_iou"] = float(np.mean(bbox_ious))
+    if rel_accs:
+        res["relation_acc"] = float(np.mean(rel_accs))
+    if ident_scores:
+        res["identity_separation"] = float(np.mean(ident_scores))
+
+    return res
 
 
 if __name__ == "__main__":
