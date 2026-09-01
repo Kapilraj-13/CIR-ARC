@@ -532,13 +532,19 @@ class Trainer:
             path,
         )
 
-    def load_checkpoint(self, path: str) -> None:
+    def load_checkpoint(self, path: str, strict: bool = False) -> None:
         """Load model weights and optimizer state from checkpoint."""
         checkpoint = torch.load(path, map_location=self.device, weights_only=False)
-        self.model.load_state_dict(checkpoint["model_state_dict"])
+        self.model.load_state_dict(checkpoint["model_state_dict"], strict=strict)
         if "optimizer_state_dict" in checkpoint:
-            self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+            try:
+                self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+            except Exception:
+                pass
         if "scheduler_state_dict" in checkpoint:
-            self.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+            try:
+                self.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+            except Exception:
+                pass
         self.step = checkpoint.get("step", 0)
         self.epoch = checkpoint.get("epoch", 0)
