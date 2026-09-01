@@ -39,4 +39,7 @@ data/
 datasets/
 checkpoints/
 recordings/
+*.recording.jsonl
+*.pt
+*.pth
 .agents/
