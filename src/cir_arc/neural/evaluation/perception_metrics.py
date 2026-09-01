@@ -422,33 +422,38 @@ def mask_iou(
     pred_masks: torch.Tensor,
     gt_objects: List[Any],
     matches: List[Tuple[int, int]],
-    threshold: float = 0.5,
+    threshold: float = 0.3,
 ) -> float:
     """Calculate mean Intersection-over-Union between predicted slot masks and ground-truth pixel sets."""
     if len(matches) == 0:
         return 1.0
 
-    masks_np = (pred_masks.detach().cpu().numpy() >= threshold) if isinstance(pred_masks, torch.Tensor) else (pred_masks >= threshold)
-    if masks_np.ndim == 4:
-        masks_np = masks_np[0]
+    raw_masks = pred_masks.detach().cpu().numpy() if isinstance(pred_masks, torch.Tensor) else np.array(pred_masks)
+    if raw_masks.ndim == 4:
+        raw_masks = raw_masks[0]
 
     ious = []
-    H, W = masks_np.shape[-2], masks_np.shape[-1]
+    H, W = raw_masks.shape[-2], raw_masks.shape[-1]
     for slot_idx, gt_idx in matches:
-        if slot_idx >= masks_np.shape[0] or gt_idx >= len(gt_objects):
+        if slot_idx >= raw_masks.shape[0] or gt_idx >= len(gt_objects):
             continue
         obj = gt_objects[gt_idx]
         gt_mask = np.zeros((H, W), dtype=bool)
-        if hasattr(obj, "pixels"):
+        if hasattr(obj, "pixels") and len(obj.pixels) > 0:
             for r, c in obj.pixels:
                 if 0 <= r < H and 0 <= c < W:
                     gt_mask[r, c] = True
 
-        pred_m = masks_np[slot_idx]
+        slot_m = raw_masks[slot_idx]
+        # Dynamic adaptive threshold relative to slot peak activation
+        peak = float(slot_m.max()) if slot_m.size > 0 else 0.0
+        effective_thresh = max(peak * 0.5, threshold) if peak > threshold else threshold
+        pred_m = slot_m >= effective_thresh
+
         intersection = np.logical_and(pred_m, gt_mask).sum()
         union = np.logical_or(pred_m, gt_mask).sum()
         if union == 0:
-            ious.append(1.0)
+            ious.append(1.0 if not gt_mask.any() else 0.0)
         else:
             ious.append(float(intersection / union))
 

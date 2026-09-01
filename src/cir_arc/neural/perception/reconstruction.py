@@ -163,18 +163,6 @@ class ReconstructionDecoder(nn.Module):
 
         scale = self.slot_dim ** -0.5
         attn_logits = torch.einsum("b n d, b k d -> b n k", q, k) * scale
-
-        if objectness is not None:
-            # Modulate cross-attention logits with objectness prior
-            obj_bias = torch.log(objectness.clamp(min=1e-6)).unsqueeze(1)  # (B, 1, K)
-            attn_logits = attn_logits + obj_bias
-
-        if slot_masks is not None:
-            # Modulate cross-attention logits with explicit slot mask spatial ownership
-            masks_flat = slot_masks.reshape(B, K, H * W).permute(0, 2, 1)  # (B, N, K)
-            mask_bias = torch.log(masks_flat.clamp(min=1e-6))
-            attn_logits = attn_logits + 0.5 * mask_bias
-
         attn_weights = F.softmax(attn_logits, dim=-1)  # (B, N, K)
 
         # Aggregated cell visual features
