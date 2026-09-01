@@ -1,0 +1,50 @@
+# CIR-ARC Phase 3 Configuration
+# Interactive Model-Based Neuro-Symbolic Cognitive Loop & ARC-AGI-3 Environment Framework
+
+environment:
+  max_layers: 4
+  max_height: 64
+  max_width: 64
+  num_colors: 16
+  action_space: 8        # 0: RESET, 1: UP, 2: DOWN, 3: LEFT, 4: RIGHT, 5: INTERACT, 6: CLICK(x,y), 7: UNDO
+
+perception:
+  slot_tracker:
+    max_slots: 24
+    matching_metric: "euclidean"
+    velocity_smoothing: 0.8
+    persistence_threshold: 0.90
+  neural_adapter:
+    enabled: true
+    checkpoint_path: "checkpoints/phase2/best_model.pt"
+
+probing:
+  max_probes: 20
+  action_repeat_threshold: 3
+  effect_detection_epsilon: 1e-4
+
+belief_state:
+  uncertainty_decay: 0.95
+  max_hypothesis_pool: 50
+  object_reid_threshold: 0.85
+
+planning:
+  horizon: 30
+  max_replans: 10
+  breakout_cycle_threshold: 4
+  macro_actions_enabled: true
+  search_algorithm: "astar"    # "astar" or "bfs"
+
+world_model:
+  rollout_depth: 10
+  replay_verification: true
+  inconsistency_threshold: 0.05
+
+benchmark:
+  default_games:
+    - "mock_maze_01"
+    - "mock_maze_02"
+    - "mock_locksmith_01"
+    - "mock_locksmith_02"
+  max_actions_per_game: 80
+  output_dir: "experiments/phase3_benchmark"

@@ -1,99 +1,68 @@
-"""Unified multi-scale perception model and training infrastructure for CIR-ARC Phase 2.5."""
+"""Trainer module and PerceptionModel integration for CIR-ARC Phase 2.
+
+Encapsulates:
+1. PerceptionModel: Full neural perception model (Embedding -> MultiScale CNN -> Proposal Slot Attention
+   -> Relational Set Transformer -> PropertyHeads -> ReconstructionDecoder).
+2. Trainer: Multi-objective training loop with AdamW optimizer, CosineAnnealingLR,
+   gradient clipping, and checkpoint persistence.
+"""
 
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from cir_arc.core.objects import ArcObject
 from cir_arc.neural.perception.embedding import ColorEmbedding
-from cir_arc.neural.perception.cnn_stem import MultiScaleCNNStem, CNNStem
+from cir_arc.neural.perception.cnn_stem import MultiScaleCNNStem
 from cir_arc.neural.perception.slot_attention import SlotAttention
 from cir_arc.neural.perception.relation_encoder import SlotRelationEncoder
-from cir_arc.neural.perception.relation_graph import RelationalGraphHead, extract_ground_truth_relations
 from cir_arc.neural.perception.property_heads import PropertyHeads
-from cir_arc.neural.perception.reconstruction import ReconstructionDecoder, SlotMaskDecoder
-from cir_arc.neural.world_state import (
-    StructuredObject,
-    SpatialRelation,
-    RelationGraph,
-    WorldState,
-    RELATION_TYPES,
-    NUM_RELATIONS,
-)
-
-from cir_arc.neural.losses.matching import hungarian_matching
+from cir_arc.neural.perception.reconstruction import ReconstructionDecoder
+from cir_arc.neural.perception.relation_graph import extract_ground_truth_relations
+from cir_arc.neural.world_state import StructuredObject, SpatialRelation, RelationGraph, WorldState
 from cir_arc.neural.losses.reconstruction import reconstruction_loss
 from cir_arc.neural.losses.property import (
     color_loss,
     position_loss,
     size_loss,
     shape_loss,
-    orientation_loss,
-    symmetry_loss,
     objectness_loss,
-    bbox_loss,
-    dimensions_loss,
-)
-from cir_arc.neural.losses.diversity import (
-    diversity_loss,
-    objectness_sparsity_loss,
 )
 from cir_arc.neural.losses.boundary import (
     boundary_loss,
     cell_objectness_loss,
 )
-from cir_arc.neural.losses.mask import (
-    slot_mask_loss,
-    mask_exclusivity_loss,
-)
-from cir_arc.neural.losses.relation import relation_loss
-from cir_arc.neural.losses.identity import object_identity_contrastive_loss
+from cir_arc.neural.losses.matching import hungarian_matching
+from cir_arc.neural.losses.diversity import diversity_loss, objectness_sparsity_loss
 
 
 class PerceptionModel(nn.Module):
-    """Unified multi-scale object-centric perception pipeline for ARC grids (~1.0M parameters).
+    """End-to-end multi-scale neural perception model for CIR-ARC Phase 2.
 
     Chains:
-    1. ColorEmbedding: (B, H, W) -> (B, H, W, 48)
-    2. MultiScaleCNNStem: (B, H, W, 48) -> tokens (B, H*W, 128), boundary_map (B, 1, H, W), cell_obj (B, 1, H, W)
-    3. Proposal SlotAttention: (B, H*W, 128) + cell_obj -> slots (B, 24, 128), objectness (B, 24), attn_maps (B, 24, H*W)
-    4. SlotRelationEncoder: slots (B, 24, 128) -> refined_slots (B, 24, 128) via Set Transformer self-attention
-    5. RelationalGraphHead: refined_slots -> relation_logits (B, 24, 24, 14)
-    6. SlotMaskDecoder: refined_slots (B, 24, 128) -> slot_masks (B, 24, H, W)
-    7. PropertyHeads: refined_slots (B, 24, 128) -> props dict (color, bbox, dims, shape, orient, sym, id, presence)
-    8. ReconstructionDecoder: refined_slots + slot_masks -> recon_logits (B, H, W, 10)
-
-    Args:
-        num_colors: Number of color embedding classes (default: 11).
-        embed_dim: Color embedding dimension (default: 48).
-        hidden_channels: CNN stem intermediate channels (default: 64).
-        stem_out_dim: CNN stem output token dimension (default: 128).
-        n_slots: Number of object slots (default: 24).
-        slot_dim: Slot representation dimension (default: 128).
-        n_iter: Number of slot attention competitive iterations (default: 3).
-        relation_layers: Number of Set Transformer attention layers (default: 2).
-        relation_heads: Number of attention heads in relation encoder (default: 4).
-        max_h: Maximum grid height (default: 30).
-        max_w: Maximum grid width (default: 30).
-        prop_hidden_dim: Hidden dimension for property heads (default: 64).
-        num_shapes: Number of shape categories (default: 8).
-        num_orientations: Number of orientation classes (default: 4).
-        num_symmetries: Number of symmetry axes (default: 4).
-        recon_num_colors: Number of target color classes for decoder (default: 10).
+    1. ColorEmbedding: (B, H, W) -> (B, H, W, embed_dim)
+    2. MultiScaleCNNStem: (B, H, W, embed_dim) -> (B, H*W, 128) + (boundary_map, cell_objectness)
+    3. ProposalSlotAttention: (B, H*W, 128) -> slots (B, 24, 128), objectness (B, 24), attn (B, 24, H*W)
+    4. SlotRelationEncoder: (B, 24, 128) -> refined_slots (B, 24, 128)
+    5. PropertyHeads: refined_slots -> {color, shape, size, position, orientation, symmetry}
+    6. ReconstructionDecoder: refined_slots -> color logits (B, H, W, 10)
     """
 
     def __init__(
         self,
         num_colors: int = 11,
         embed_dim: int = 48,
-        hidden_channels: int = 64,
+        stem_hidden_dim: int = 64,
         stem_out_dim: int = 128,
         n_slots: int = 24,
         slot_dim: int = 128,
+        feat_dim: int = 128,
         n_iter: int = 3,
         relation_layers: int = 2,
         relation_heads: int = 4,
@@ -112,21 +81,23 @@ class PerceptionModel(nn.Module):
         self.max_w = max_w
 
         # 1. Color Embedding
-        self.embedding = ColorEmbedding(num_colors=num_colors, embed_dim=embed_dim)
+        self.embedding = ColorEmbedding(
+            num_colors=num_colors,
+            embed_dim=embed_dim,
+        )
 
-        # 2. Multi-Scale Hierarchical CNN with Proposal Heads
+        # 2. Multi-Scale CNN Feature Stem
         self.cnn_stem = MultiScaleCNNStem(
             in_channels=embed_dim,
-            hidden_channels=hidden_channels,
+            hidden_channels=stem_hidden_dim,
             out_channels=stem_out_dim,
-            num_groups=8,
         )
 
         # 3. Proposal-guided Slot Attention
         self.slot_attention = SlotAttention(
             n_slots=n_slots,
             slot_dim=slot_dim,
-            feat_dim=stem_out_dim,
+            feat_dim=feat_dim,
             n_iter=n_iter,
             eps=1e-8,
             hidden_dim=256,
@@ -142,22 +113,7 @@ class PerceptionModel(nn.Module):
             dropout=0.0,
         )
 
-        # 5. Relational Graph Head
-        self.relation_head = RelationalGraphHead(
-            slot_dim=slot_dim,
-            hidden_dim=128,
-            num_relations=NUM_RELATIONS,
-        )
-
-        # 6. Spatial Slot Mask Decoder
-        self.mask_decoder = SlotMaskDecoder(
-            slot_dim=slot_dim,
-            max_h=max_h,
-            max_w=max_w,
-            hidden_dim=64,
-        )
-
-        # 7. Symbolic Property Prediction Heads
+        # 5. Symbolic Property Prediction Heads
         self.property_heads = PropertyHeads(
             slot_dim=slot_dim,
             hidden_dim=prop_hidden_dim,
@@ -165,10 +121,9 @@ class PerceptionModel(nn.Module):
             num_shapes=num_shapes,
             num_orientations=num_orientations,
             num_symmetries=num_symmetries,
-            identity_dim=64,
         )
 
-        # 8. Spatial Reconstruction Decoder
+        # 6. Spatial Reconstruction Decoder
         self.decoder = ReconstructionDecoder(
             slot_dim=slot_dim,
             max_h=max_h,
@@ -181,23 +136,14 @@ class PerceptionModel(nn.Module):
         grid: torch.Tensor,
         mask: Optional[torch.Tensor] = None,
     ) -> Dict[str, Any]:
-        """Forward pass through full multi-scale perception pipeline.
+        """Forward pass through perception pipeline.
 
         Args:
             grid: LongTensor of shape (B, H, W) containing discrete color indices (0-10).
             mask: Optional Tensor of shape (B, H, W) or (B, H*W) with 1.0/True at valid cells.
 
         Returns:
-            Dict containing:
-                - "slots": (B, n_slots, slot_dim)
-                - "objectness": (B, n_slots)
-                - "relation_logits": (B, n_slots, n_slots, 14)
-                - "attn_maps": (B, n_slots, H*W)
-                - "boundary_map": (B, 1, H, W)
-                - "cell_objectness": (B, 1, H, W)
-                - "slot_masks": (B, n_slots, H, W)
-                - "props": dict with color, shape, size, position, bbox, dimensions, orientation, symmetry, identity, presence
-                - "recon_logits": (B, H, W, 10)
+            Dict containing slots, objectness, attn_maps, boundary_map, cell_objectness, props, recon_logits.
         """
         B, H, W = grid.shape
 
@@ -222,20 +168,12 @@ class PerceptionModel(nn.Module):
         # Step 4: Relational Set Transformer refinement
         refined_slots = self.relation_encoder(slots, objectness=objectness)
 
-        # Step 5: Relational Graph head predicting all pairwise relations
-        relation_logits = self.relation_head(refined_slots, objectness=objectness)
-
-        # Step 6: Spatial ownership mask decoding per slot
-        slot_masks = self.mask_decoder(refined_slots, H=H, W=W)
-
-        # Step 7: Symbolic property prediction
+        # Step 5: Symbolic property prediction
         props = self.property_heads(refined_slots)
 
-        # Step 8: Reconstruction decoder back to 2D grid logits
+        # Step 6: Reconstruction decoder back to 2D grid logits
         recon_logits = self.decoder(
             refined_slots,
-            objectness=objectness,
-            slot_masks=slot_masks,
             H=H,
             W=W,
         )
@@ -244,11 +182,9 @@ class PerceptionModel(nn.Module):
             "slots": refined_slots,
             "raw_slots": slots,
             "objectness": objectness,
-            "relation_logits": relation_logits,
             "attn_maps": attn_maps,
             "boundary_map": boundary_map,
             "cell_objectness": cell_objectness,
-            "slot_masks": slot_masks,
             "props": props,
             "recon_logits": recon_logits,
         }
@@ -283,100 +219,137 @@ class PerceptionModel(nn.Module):
         props = out["props"]
         colors = props["color"][0].argmax(dim=-1).cpu().numpy()     # (K,)
         positions = props["position"][0].cpu().numpy()              # (K, 2)
-        bboxes = props["bbox"][0].cpu().numpy()                     # (K, 4)
-        dims = props["dimensions"][0].cpu().numpy()                 # (K, 4)
-        aspects = props["aspect_ratio"][0].cpu().numpy()            # (K, 1)
+        sizes = props["size"][0].cpu().numpy().reshape(-1)          # (K,)
         shapes = props["shape"][0].argmax(dim=-1).cpu().numpy()     # (K,)
         orientations = props["orientation"][0].argmax(dim=-1).cpu().numpy() # (K,)
         symmetries = (torch.sigmoid(props["symmetry"][0]) >= 0.5).cpu().numpy() # (K, 4)
-        holes = (props["holes"][0] >= 0.5).cpu().numpy()            # (K, 1)
-        identities = props["identity"][0].cpu().numpy()             # (K, 64)
-        masks = out["slot_masks"][0].cpu().numpy()                  # (K, H, W)
+        attn_maps = out["attn_maps"][0].cpu().numpy().reshape(self.n_slots, H, W) # (K, H, W)
 
         # Construct StructuredObject list for active slots
         objects: List[StructuredObject] = []
+        arc_objects: List[ArcObject] = []
+
         for k in range(self.n_slots):
             conf = float(objectness[k])
             if conf < obj_threshold:
                 continue
+
+            # Compute exact bounding box and pixels from slot spatial attention map
+            slot_attn = attn_maps[k]
+            peak = float(slot_attn.max()) if slot_attn.size > 0 else 0.0
+            thresh = max(peak * 0.4, 0.1)
+            slot_mask = slot_attn >= thresh
+
+            active_pixels = np.argwhere(slot_mask)
+            if len(active_pixels) == 0:
+                # Fallback to centroid point
+                r_c = int(np.clip(positions[k, 0] * (H - 1), 0, H - 1))
+                c_c = int(np.clip(positions[k, 1] * (W - 1), 0, W - 1))
+                active_pixels = np.array([[r_c, c_c]])
+
+            r_min = float(active_pixels[:, 0].min() / max(H - 1, 1))
+            r_max = float(active_pixels[:, 0].max() / max(H - 1, 1))
+            c_min = float(active_pixels[:, 1].min() / max(W - 1, 1))
+            c_max = float(active_pixels[:, 1].max() / max(W - 1, 1))
+            width = float((active_pixels[:, 1].max() - active_pixels[:, 1].min() + 1) / max(W, 1))
+            height = float((active_pixels[:, 0].max() - active_pixels[:, 0].min() + 1) / max(H, 1))
+            area = float(len(active_pixels) / max(H * W, 1))
+            perimeter = float(2 * (width + height))
+            aspect_ratio = float(width / max(height, 1e-4))
 
             obj = StructuredObject(
                 slot_id=k,
                 color=int(colors[k]),
                 confidence=conf,
                 centroid=(float(positions[k, 0]), float(positions[k, 1])),
-                bbox=(float(bboxes[k, 0]), float(bboxes[k, 1]), float(bboxes[k, 2]), float(bboxes[k, 3])),
-                width=float(dims[k, 0]),
-                height=float(dims[k, 1]),
-                area=float(dims[k, 2]),
-                perimeter=float(dims[k, 3]),
-                aspect_ratio=float(aspects[k, 0]),
+                bbox=(r_min, c_min, r_max, c_max),
+                width=width,
+                height=height,
+                area=area,
+                perimeter=perimeter,
+                aspect_ratio=aspect_ratio,
                 shape_class=int(shapes[k]),
                 orientation=int(orientations[k]),
                 symmetries=(bool(symmetries[k, 0]), bool(symmetries[k, 1]), bool(symmetries[k, 2]), bool(symmetries[k, 3])),
-                has_holes=bool(holes[k, 0]),
-                mask=masks[k] >= 0.5,
-                identity_vector=identities[k],
-                raw_slot_vector=slots[k],
+                has_holes=False,
+                mask=slot_mask,
+                identity_vector=slots[k, :64],
             )
             objects.append(obj)
 
-        # Extract Relational Graph
-        rel_graphs = self.relation_head.predict_graph(
-            out["slots"],
-            objectness=out["objectness"],
-            threshold=rel_threshold,
-            obj_threshold=obj_threshold,
-        )
-        rel_graph = rel_graphs[0]
+            # Construct ArcObject for exact relational graph computation
+            arc_obj = ArcObject(
+                color=int(colors[k]),
+                pixels=active_pixels,
+            )
+            arc_objects.append(arc_obj)
 
-        boundary_np = out["boundary_map"][0, 0].cpu().numpy() if "boundary_map" in out else None
-        cell_obj_np = out["cell_objectness"][0, 0].cpu().numpy() if "cell_objectness" in out else None
+        # Compute exact 14-predicate Relational Graph from detected objects
+        gt_rel_mat = extract_ground_truth_relations(arc_objects, H=H, W=W)
+        from cir_arc.neural.world_state import RELATION_TYPES
+
+        active_relations: List[SpatialRelation] = []
+        for i in range(gt_rel_mat.shape[0]):
+            for j in range(gt_rel_mat.shape[1]):
+                if i == j:
+                    continue
+                for r_idx, rel_name in enumerate(RELATION_TYPES):
+                    conf = float(gt_rel_mat[i, j, r_idx])
+                    if conf >= rel_threshold:
+                        src_id = objects[i].slot_id if i < len(objects) else i
+                        tgt_id = objects[j].slot_id if j < len(objects) else j
+                        active_relations.append(
+                            SpatialRelation(
+                                source_id=src_id,
+                                relation_type=rel_name,
+                                target_id=tgt_id,
+                                confidence=conf,
+                            )
+                        )
+
+        relation_graph = RelationGraph(
+            adj_matrix=gt_rel_mat,
+            edge_list=active_relations,
+        )
 
         return WorldState(
             objects=objects,
-            relations=rel_graph.edge_list,
-            relation_graph=rel_graph,
-            raw_grid=raw_grid_np if raw_grid_np.ndim == 2 else raw_grid_np[0],
+            relations=active_relations,
+            relation_graph=relation_graph,
+            raw_grid=raw_grid_np,
             grid_shape=(H, W),
             frame_index=frame_index,
-            boundary_map=boundary_np,
-            cell_objectness=cell_obj_np,
-            global_features=slots.mean(axis=0),
         )
 
 
 class Trainer:
-    """Trainer encapsulating multi-objective optimization, Hungarian matching, and checkpointing.
-
-    Args:
-        model: PerceptionModel instance.
-        config: Optional configuration dictionary.
-        lr: Learning rate (default: 1e-3).
-        weight_decay: Weight decay for AdamW (default: 1e-4).
-        clip_grad_norm: Maximum gradient norm for clipping (default: 1.0).
-        loss_weights: Optional dictionary of loss component weights.
-        device: torch.device or string.
-    """
+    """Multi-objective training manager for PerceptionModel."""
 
     def __init__(
         self,
         model: PerceptionModel,
         config: Optional[Dict[str, Any]] = None,
-        lr: float = 1e-3,
-        weight_decay: float = 1e-4,
-        clip_grad_norm: float = 1.0,
         loss_weights: Optional[Dict[str, float]] = None,
-        device: Optional[Union[torch.device, str]] = None,
+        lr: Optional[float] = None,
+        clip_grad_norm: Optional[float] = None,
+        device: Optional[Union[str, torch.device]] = None,
+        **kwargs: Any,
     ) -> None:
         self.model = model
         self.config = config or {}
-        self.lr = float(self.config.get("training", {}).get("learning_rate", lr))
-        self.weight_decay = float(self.config.get("training", {}).get("weight_decay", weight_decay))
-        self.clip_grad_norm = float(self.config.get("training", {}).get("clip_grad_norm", clip_grad_norm))
 
-        if device is not None:
-            self.device = torch.device(device)
+        train_cfg = self.config.get("training", {})
+        self.lr = float(lr if lr is not None else train_cfg.get("learning_rate", 1e-3))
+        self.weight_decay = float(train_cfg.get("weight_decay", 1e-4))
+        self.clip_grad_norm = float(clip_grad_norm if clip_grad_norm is not None else train_cfg.get("clip_grad_norm", 1.0))
+
+        device_setting = device if device is not None else train_cfg.get("device")
+        if isinstance(device_setting, torch.device):
+            self.device = device_setting
+        elif device_setting == "cuda" and torch.cuda.is_available():
+            self.device = torch.device("cuda")
+        elif device_setting == "cpu":
+            self.device = torch.device("cpu")
         else:
             self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -391,22 +364,16 @@ class Trainer:
         if loss_weights is not None:
             weights_cfg.update(loss_weights)
 
-        self.recon_weight = float(weights_cfg.get("recon_weight", 2.0))
+        self.recon_weight = float(weights_cfg.get("recon_weight", 1.5))
         self.color_weight = float(weights_cfg.get("color_weight", 1.0))
         self.pos_weight = float(weights_cfg.get("pos_weight", 1.0))
         self.size_weight = float(weights_cfg.get("size_weight", 0.5))
-        self.bbox_weight = float(weights_cfg.get("bbox_weight", 0.5))
-        self.dims_weight = float(weights_cfg.get("dims_weight", 0.3))
-        self.shape_weight = float(weights_cfg.get("shape_weight", 0.3))
-        self.obj_weight = float(weights_cfg.get("obj_weight", 0.5))
-        self.div_weight = float(weights_cfg.get("div_weight", 0.005))
-        self.sparse_weight = float(weights_cfg.get("sparse_weight", 0.005))
-        self.bound_weight = float(weights_cfg.get("bound_weight", 0.3))
-        self.cell_obj_weight = float(weights_cfg.get("cell_obj_weight", 0.3))
-        self.mask_weight = float(weights_cfg.get("mask_weight", 0.5))
-        self.excl_weight = float(weights_cfg.get("excl_weight", 0.01))
-        self.relation_weight = float(weights_cfg.get("relation_weight", 0.2))
-        self.identity_weight = float(weights_cfg.get("identity_weight", 0.05))
+        self.shape_weight = float(weights_cfg.get("shape_weight", 0.5))
+        self.obj_weight = float(weights_cfg.get("obj_weight", 1.0))
+        self.bound_weight = float(weights_cfg.get("bound_weight", 0.5))
+        self.cell_obj_weight = float(weights_cfg.get("cell_obj_weight", 0.5))
+        self.div_weight = float(weights_cfg.get("div_weight", 0.01))
+        self.sparse_weight = float(weights_cfg.get("sparse_weight", 0.01))
 
         total_epochs = int(self.config.get("training", {}).get("epochs", 30))
         self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
@@ -419,12 +386,17 @@ class Trainer:
         self.epoch = 0
 
     def step_scheduler(self) -> float:
-        """Advance learning rate scheduler and return current learning rate."""
+        """Advance LR scheduler by one epoch and return current learning rate."""
         self.scheduler.step()
-        return self.optimizer.param_groups[0]["lr"]
+        self.epoch += 1
+        return self.get_current_lr()
+
+    def get_current_lr(self) -> float:
+        """Return the current learning rate."""
+        return float(self.optimizer.param_groups[0]["lr"])
 
     def train_step(self, batch: Dict[str, Any]) -> Dict[str, float]:
-        """Perform a single training step across all multi-objective perception losses.
+        """Perform a single forward and backward optimization step.
 
         Args:
             batch: Dictionary containing input_grids, input_masks, gt_objects, boundary_targets, etc.
@@ -459,8 +431,6 @@ class Trainer:
         recon_logits = outputs["recon_logits"]
         pred_boundary = outputs["boundary_map"]
         pred_cell_obj = outputs["cell_objectness"]
-        pred_masks = outputs["slot_masks"]
-        pred_relations = outputs["relation_logits"]
 
         # 1. Grid Reconstruction Loss
         loss_recon = reconstruction_loss(recon_logits, grids, mask=masks)
@@ -468,7 +438,6 @@ class Trainer:
         # 2. Hungarian Matching for Object Supervision
         B = grids.shape[0]
         matches_batch: List[List[Tuple[int, int]]] = []
-        gt_relation_targets: List[np.ndarray] = []
 
         for b in range(B):
             sample_objs = gt_objects[b] if b < len(gt_objects) else []
@@ -484,28 +453,18 @@ class Trainer:
             )
             matches_batch.append(matches)
 
-            # Compute GT relational matrix for sample objects
-            gt_rel_mat = extract_ground_truth_relations(sample_objs, H=sample_h, W=sample_w)
-            gt_relation_targets.append(gt_rel_mat)
-
-        # 3. Property & Geometry Losses
+        # 3. Property Losses
         loss_color = color_loss(props["color"], gt_objects, matches_batch)
         loss_pos = position_loss(props["position"], gt_objects, matches_batch, H=heights, W=widths)
         loss_size = size_loss(props["size"], gt_objects, matches_batch, H=heights, W=widths)
         loss_shape = shape_loss(props["shape"], gt_objects, matches_batch)
         loss_obj = objectness_loss(objectness, matches_batch)
-        loss_bbox = bbox_loss(props["bbox"], gt_objects, matches_batch, H=heights, W=widths)
-        loss_dims = dimensions_loss(props["dimensions"], gt_objects, matches_batch, H=heights, W=widths)
 
-        # 4. Relational Graph & Contrastive Object Identity Losses
-        loss_relation = relation_loss(pred_relations, gt_relation_targets, matches_batch)
-        loss_identity = object_identity_contrastive_loss(props["identity"], matches_batch)
-
-        # 5. Diversity & Sparsity Regularizations
+        # 4. Diversity & Sparsity Regularizations
         loss_div = diversity_loss(slots)
         loss_sparse = objectness_sparsity_loss(objectness)
 
-        # 6. Boundary & Cell Objectness Losses
+        # 5. Boundary & Cell Objectness Losses
         if boundary_targets is not None:
             loss_bound = boundary_loss(pred_boundary, boundary_targets, mask=masks)
         else:
@@ -516,28 +475,18 @@ class Trainer:
         else:
             loss_cell_obj = torch.tensor(0.0, device=self.device)
 
-        # 7. Spatial Mask Loss & Exclusivity Loss
-        loss_mask = slot_mask_loss(pred_masks, gt_objects, matches_batch)
-        loss_excl = mask_exclusivity_loss(pred_masks, objectness=objectness)
-
         # Total Weighted Multi-Objective Loss
         total_loss = (
             self.recon_weight * loss_recon
             + self.color_weight * loss_color
             + self.pos_weight * loss_pos
             + self.size_weight * loss_size
-            + self.bbox_weight * loss_bbox
-            + self.dims_weight * loss_dims
             + self.shape_weight * loss_shape
             + self.obj_weight * loss_obj
-            + self.relation_weight * loss_relation
-            + self.identity_weight * loss_identity
-            + self.div_weight * loss_div
-            + self.sparse_weight * loss_sparse
             + self.bound_weight * loss_bound
             + self.cell_obj_weight * loss_cell_obj
-            + self.mask_weight * loss_mask
-            + self.excl_weight * loss_excl
+            + self.div_weight * loss_div
+            + self.sparse_weight * loss_sparse
         )
 
         total_loss.backward()
@@ -558,18 +507,12 @@ class Trainer:
             "pos_loss": float(loss_pos.item()),
             "loss_size": float(loss_size.item()),
             "size_loss": float(loss_size.item()),
-            "loss_bbox": float(loss_bbox.item()),
-            "loss_dims": float(loss_dims.item()),
             "loss_shape": float(loss_shape.item()),
             "shape_loss": float(loss_shape.item()),
             "loss_obj": float(loss_obj.item()),
             "obj_loss": float(loss_obj.item()),
-            "loss_relation": float(loss_relation.item()),
-            "loss_identity": float(loss_identity.item()),
             "loss_bound": float(loss_bound.item()),
             "loss_cell_obj": float(loss_cell_obj.item()),
-            "loss_mask": float(loss_mask.item()),
-            "loss_excl": float(loss_excl.item()),
             "loss_div": float(loss_div.item()),
             "loss_sparse": float(loss_sparse.item()),
         }
@@ -581,6 +524,7 @@ class Trainer:
             {
                 "model_state_dict": self.model.state_dict(),
                 "optimizer_state_dict": self.optimizer.state_dict(),
+                "scheduler_state_dict": self.scheduler.state_dict(),
                 "step": self.step,
                 "epoch": self.epoch,
                 "config": self.config,
@@ -589,10 +533,12 @@ class Trainer:
         )
 
     def load_checkpoint(self, path: str) -> None:
-        """Load model weights and trainer state from checkpoint file."""
+        """Load model weights and optimizer state from checkpoint."""
         checkpoint = torch.load(path, map_location=self.device, weights_only=False)
         self.model.load_state_dict(checkpoint["model_state_dict"])
         if "optimizer_state_dict" in checkpoint:
             self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        if "scheduler_state_dict" in checkpoint:
+            self.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
         self.step = checkpoint.get("step", 0)
         self.epoch = checkpoint.get("epoch", 0)

@@ -149,5 +149,6 @@ class TestPerceptionModelBudgetAndIntegration:
         assert "loss" in metrics and isinstance(metrics["loss"], float)
         assert metrics["loss"] > 0.0
         assert "loss_bound" in metrics
-        assert "loss_mask" in metrics
-        assert "loss_excl" in metrics
+        assert "loss_cell_obj" in metrics
+        assert "loss_div" in metrics
+        assert "loss_sparse" in metrics

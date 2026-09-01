@@ -194,6 +194,8 @@ class SlotAttention(nn.Module):
         return slots, objectness, attn_maps
 
 
+ProposalSlotAttention = SlotAttention
+
 if __name__ == "__main__":
     print("Running SlotAttention smoke test...")
     model = SlotAttention()

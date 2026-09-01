@@ -37,7 +37,22 @@ class MockEngine(BaseEnvironment):
     def _init_game_layout(self) -> None:
         """Setup initial game layout based on game_id."""
         self.walls = set()
-        if "maze" in self.game_id:
+        if self.game_id == "mock_maze_02":
+            self.grid_size = (9, 9)
+            self.player_pos = [1, 1]
+            self.goal_pos = [7, 7]
+            for r in range(9):
+                self.walls.add((r, 0))
+                self.walls.add((r, 8))
+            for c in range(9):
+                self.walls.add((0, c))
+                self.walls.add((8, c))
+            # S-curve internal walls
+            for c in range(1, 6):
+                self.walls.add((3, c))
+            for c in range(3, 8):
+                self.walls.add((6, c))
+        elif "maze" in self.game_id:
             self.grid_size = (8, 8)
             self.player_pos = [1, 1]
             self.goal_pos = [6, 6]
@@ -55,6 +70,22 @@ class MockEngine(BaseEnvironment):
             self.walls.add((2, 4))
             self.walls.add((3, 4))
             self.walls.add((4, 4))
+        elif self.game_id == "mock_locksmith_02":
+            self.grid_size = (9, 9)
+            self.player_pos = [1, 1]
+            self.key_pos = [1, 7]
+            self.door_pos = [4, 4]
+            self.goal_pos = [7, 7]
+            self.has_key = False
+            self.door_open = False
+            for r in range(9):
+                self.walls.add((r, 0))
+                self.walls.add((r, 8))
+                self.walls.add((4, r))
+            for c in range(9):
+                self.walls.add((0, c))
+                self.walls.add((8, c))
+            self.walls.remove((4, 4))
         elif "locksmith" in self.game_id or "ls20" in self.game_id:
             self.grid_size = (10, 10)
             self.player_pos = [1, 1]
