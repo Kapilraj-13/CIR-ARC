@@ -60,6 +60,7 @@ from cir_arc.neural.losses.boundary import (
 )
 from cir_arc.neural.losses.matching import hungarian_matching
 from cir_arc.neural.losses.diversity import diversity_loss, objectness_sparsity_loss
+from cir_arc.neural.losses.consistency import latent_transition_loss, neuro_symbolic_alignment_loss
 
 
 class PerceptionModel(nn.Module):
@@ -654,6 +655,70 @@ class Trainer:
             "loss_cell_obj": float(loss_cell_obj.item()),
             "loss_div": float(loss_div.item()),
             "loss_sparse": float(loss_sparse.item()),
+        }
+
+    def train_trajectory_step(self, batch: Dict[str, Any]) -> Dict[str, float]:
+        """Performs an optimization step on a trajectory transition (grid_t, a_t, grid_next).
+
+        Computes:
+        1. Reconstruction losses on grid_t and grid_next
+        2. Latent transition loss between predicted S_hat_{t+1} and encoded S_{t+1}^*
+        3. Dual Neuro-Symbolic alignment loss between continuous slots and symbolic properties
+        """
+        grid_t = batch["grid_t"].to(self.device)
+        mask_t = batch["valid_mask_t"].to(self.device)
+        actions = batch["action"].to(self.device)
+        grid_next = batch["grid_next"].to(self.device)
+        mask_next = batch["valid_mask_next"].to(self.device)
+
+        self.model.train()
+        self.optimizer.zero_grad()
+
+        # 1. Forward on grid_t
+        out_t = self.model(grid_t, mask=mask_t)
+        slots_t = out_t["slots"]
+        recon_t = out_t["recon_logits"]
+        props_t = out_t["props"]
+
+        # 2. Forward on grid_next
+        out_next = self.model(grid_next, mask=mask_next)
+        slots_next = out_next["slots"]
+        recon_next = out_next["recon_logits"]
+
+        # 3. Latent transition prediction
+        if self.model.transition_model is None:
+            self.model.transition_model = ActionConditionedTransitionModel(slot_dim=self.model.slot_dim).to(self.device)
+
+        pred_next_slots, delta_pos = self.model.transition_model(slots_t, actions)
+        loss_trans = latent_transition_loss(pred_next_slots, slots_next)
+
+        # 4. Mutual Neuro-Symbolic consistency loss
+        loss_align = neuro_symbolic_alignment_loss(slots_t, props_t)
+
+        # 5. Grid reconstruction losses with explicit mask
+        loss_rec_t = reconstruction_loss(recon_t, grid_t, mask=mask_t)
+        loss_rec_next = reconstruction_loss(recon_next, grid_next, mask=mask_next)
+
+        total_loss = (
+            1.5 * loss_rec_t
+            + 0.5 * loss_rec_next
+            + 1.0 * loss_trans
+            + 0.2 * loss_align
+        )
+
+        total_loss.backward()
+        if self.clip_grad_norm > 0:
+            nn.utils.clip_grad_norm_(self.model.parameters(), self.clip_grad_norm)
+
+        self.optimizer.step()
+        self.step += 1
+
+        return {
+            "loss": float(total_loss.item()),
+            "loss_recon_t": float(loss_rec_t.item()),
+            "loss_recon_next": float(loss_rec_next.item()),
+            "loss_transition": float(loss_trans.item()),
+            "loss_alignment": float(loss_align.item()),
         }
 
     def save_checkpoint(self, path: str) -> None:

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import collections
 import copy
+import heapq
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, Union
 
 import numpy as np
@@ -350,9 +351,7 @@ class GravityTrajectoriesEnv(ProceduralInteractiveEnv):
         self.walls.discard(self.goal_pos)
 
         # Place boulder on upper platform safely
-        self.init_boulders: List[Tuple[int, int]] = []
-        if dim > 8:
-            self.init_boulders.append((1, dim - 3))
+        self.init_boulders: List[Tuple[int, int]] = [(1, dim - 3)]
 
         self.player_pos = self.init_player
         self.boulders = list(self.init_boulders)
@@ -396,8 +395,8 @@ class GravityTrajectoriesEnv(ProceduralInteractiveEnv):
                 new_b_set.add((br, bc))
         b_set = new_b_set
 
-        # Player gravity if not on ground
-        if (pr + 1, pc) not in self.walls and (pr + 1, pc) not in b_set and pr < h - 3:
+        # Player gravity if not jumping up and not on ground
+        if action_id != 1 and (pr + 1, pc) not in self.walls and (pr + 1, pc) not in b_set and pr < h - 3:
             pr += 1
 
         is_win = (pr, pc) == self.goal_pos and not crushed
@@ -724,10 +723,10 @@ class IceSlidingInertiaEnv(ProceduralInteractiveEnv):
         self.init_player = (1, 1)
         self.goal_pos = (dim - 2, dim - 2)
 
-        # Place extra obstacles in corners that do not block the L-slide or multi-slide
+        # Place extra obstacles in interior that do not block the L-slide or multi-slide
         if self.tier > 3:
-            self.walls.add((dim // 2, 1))
-            self.walls.add((dim // 2, dim - 2))
+            self.walls.add((dim // 2, 2))
+            self.walls.add((dim // 2, dim - 3))
 
         self.walls.discard(self.init_player)
         self.walls.discard(self.goal_pos)
@@ -956,24 +955,31 @@ class SokobanBlockPushingEnv(ProceduralInteractiveEnv):
         return (nr, nc), boxes
 
     def _solve_level(self) -> Optional[List[int]]:
+        def h(b_tuple: Tuple[Tuple[int, int], ...]) -> int:
+            return sum(abs(b[0] - t[0]) + abs(b[1] - t[1]) for b, t in zip(b_tuple, self.targets))
+
         init_state = (self.init_player, tuple(sorted(self.init_boxes)))
         target_set = set(self.targets)
-        queue = collections.deque([(init_state, [])])
-        visited = {init_state}
+        pq: List[Tuple[int, int, Tuple[Tuple[int, int], Tuple[Tuple[int, int], ...]], List[int]]] = [
+            (h(init_state[1]), 0, init_state, [])
+        ]
+        visited: Dict[Tuple[Tuple[int, int], Tuple[Tuple[int, int], ...]], int] = {init_state: 0}
+        max_limit = self.max_steps
 
-        while queue:
-            (pos, b_tuple), path = queue.popleft()
+        while pq:
+            f, g, (pos, b_tuple), path = heapq.heappop(pq)
             if set(b_tuple) == target_set:
                 return path
-            if len(path) >= 30:
+            if g >= max_limit:
                 continue
 
-            for aid in [4, 1, 2, 3]:
+            for aid in [4, 2, 1, 3]:
                 np_pos, nb_pos = self._push_step(pos, list(b_tuple), aid)
                 nxt = (np_pos, tuple(nb_pos))
-                if nxt not in visited:
-                    visited.add(nxt)
-                    queue.append((nxt, path + [aid]))
+                ng = g + 1
+                if nxt not in visited or ng < visited[nxt]:
+                    visited[nxt] = ng
+                    heapq.heappush(pq, (ng + h(nxt[1]) * 2, ng, nxt, path + [aid]))
         return None
 
     def _apply_action(self, action: Action) -> None:

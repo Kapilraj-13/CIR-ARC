@@ -43,3 +43,4 @@ recordings/
 *.pt
 *.pth
 .agents/
+scratch/
