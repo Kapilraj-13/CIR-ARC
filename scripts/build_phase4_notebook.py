@@ -239,9 +239,12 @@ def generate_notebook() -> None:
                     "    weight_decay=0.01,\n",
                     "    eps=1e-8,\n",
                     ")\n",
-                    "\n",
-                    "scaler = torch.cuda.amp.GradScaler(enabled=(compute_dtype == torch.float16))\n",
+                    "try:\n",
+                    "    scaler = torch.amp.GradScaler('cuda', enabled=(compute_dtype == torch.float16 and device.type == 'cuda'))\n",
+                    "except Exception:\n",
+                    "    scaler = torch.cuda.amp.GradScaler(enabled=(compute_dtype == torch.float16 and device.type == 'cuda'))\n",
                     "print('Optimizer and GradScaler initialized successfully.')"
+
                 ]
             },
             {
