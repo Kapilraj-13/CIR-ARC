@@ -530,6 +530,11 @@ class Trainer:
             eta_min=1e-5,
         )
 
+        # Reconstruction class weights: penalize missing colored objects (1-9: weight 2.0) vs background (0: weight 0.2)
+        self.class_weights = torch.tensor(
+            [0.2] + [2.0] * 9, dtype=torch.float32, device=self.device
+        )
+
         self.step = 0
         self.epoch = 0
 
@@ -573,7 +578,7 @@ class Trainer:
         pred_cell_obj = outputs["cell_objectness"]
 
         # 1. Grid Reconstruction Loss
-        loss_recon = reconstruction_loss(recon_logits, grids, mask=masks)
+        loss_recon = reconstruction_loss(recon_logits, grids, mask=masks, weight=self.class_weights)
 
         # 2. Hungarian Matching for Object Supervision
         B = grids.shape[0]
@@ -695,9 +700,9 @@ class Trainer:
         # 4. Mutual Neuro-Symbolic consistency loss
         loss_align = neuro_symbolic_alignment_loss(slots_t, props_t)
 
-        # 5. Grid reconstruction losses with explicit mask
-        loss_rec_t = reconstruction_loss(recon_t, grid_t, mask=mask_t)
-        loss_rec_next = reconstruction_loss(recon_next, grid_next, mask=mask_next)
+        # 5. Grid reconstruction losses with explicit mask and balanced class weights
+        loss_rec_t = reconstruction_loss(recon_t, grid_t, mask=mask_t, weight=self.class_weights)
+        loss_rec_next = reconstruction_loss(recon_next, grid_next, mask=mask_next, weight=self.class_weights)
 
         total_loss = (
             1.5 * loss_rec_t
