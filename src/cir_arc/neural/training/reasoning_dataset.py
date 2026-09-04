@@ -58,12 +58,96 @@ RULE_ACTION_MAP = {
 }
 
 
+def ensure_synthetic_data(
+    output_dir: Union[str, Path] = "data/synthetic",
+    n_per_rule: int = 800,
+    n_per_pair: int = 400,
+    quiet: bool = False,
+) -> Tuple[int, int]:
+    """Generates procedural single-rule and composition ARC tasks if not already present.
+    
+    Default settings generate ~12,000 tasks (9,600 train, 2,400 held_out) across 13
+    single rules and 4 compositional rule pairs.
+    """
+    out_path = Path(output_dir)
+    train_dir = out_path / "train"
+    held_dir = out_path / "held_out"
+
+    train_files = list(train_dir.rglob("*.json")) if train_dir.exists() else []
+    held_files = list(held_dir.rglob("*.json")) if held_dir.exists() else []
+
+    if len(train_files) > 0:
+        return len(train_files), len(held_files)
+
+    if not quiet:
+        print(f"Dataset not found on disk. Generating procedural ARC synthetic corpus into '{out_path}'...")
+
+    from cir_arc.generators.single_rule import GENERATOR_REGISTRY
+    from cir_arc.generators.composition import TwoRuleGenerator
+
+    TRAIN_SEED = 42
+    HELD_OUT_SEED = 200
+    SPLIT_RATIO = 0.8
+    COMPOSITION_PAIRS = [
+        ("reflect_horizontal", "color_swap_all"),
+        ("rotate_90", "color_swap_all"),
+        ("gravity", "reflect_vertical"),
+        ("scale_up", "color_swap_all"),
+    ]
+
+    # 1. Single-rule generators
+    for rule_name, GeneratorClass in GENERATOR_REGISTRY.items():
+        gen = GeneratorClass()
+        n_train = max(1, int(n_per_rule * SPLIT_RATIO))
+        n_held = max(1, n_per_rule - n_train)
+
+        train_tasks = gen.generate_batch(n_train, seed=TRAIN_SEED)
+        r_train_dir = train_dir / rule_name
+        r_train_dir.mkdir(parents=True, exist_ok=True)
+        for task in train_tasks:
+            task.save(r_train_dir / f"{task.task_id}.json")
+
+        held_tasks = gen.generate_batch(n_held, seed=HELD_OUT_SEED)
+        r_held_dir = held_dir / rule_name
+        r_held_dir.mkdir(parents=True, exist_ok=True)
+        for task in held_tasks:
+            task.save(r_held_dir / f"{task.task_id}.json")
+
+    # 2. Composition generators
+    for rule_a, rule_b in COMPOSITION_PAIRS:
+        gen = TwoRuleGenerator(rule_a, rule_b)
+        n_train = max(1, int(n_per_pair * SPLIT_RATIO))
+        n_held = max(1, n_per_pair - n_train)
+
+        train_tasks = gen.generate_batch(n_train, seed=TRAIN_SEED + 1)
+        rule_key = f"compose_{rule_a}__{rule_b}"
+        c_train_dir = train_dir / rule_key
+        c_train_dir.mkdir(parents=True, exist_ok=True)
+        for task in train_tasks:
+            task.save(c_train_dir / f"{task.task_id}.json")
+
+        held_tasks = gen.generate_batch(n_held, seed=HELD_OUT_SEED + 1)
+        c_held_dir = held_dir / rule_key
+        c_held_dir.mkdir(parents=True, exist_ok=True)
+        for task in held_tasks:
+            task.save(c_held_dir / f"{task.task_id}.json")
+
+    train_count = len(list(train_dir.rglob("*.json")))
+    held_count = len(list(held_dir.rglob("*.json")))
+    if not quiet:
+        print(f"Generated {train_count:,} train and {held_count:,} held-out procedural tasks.")
+    return train_count, held_count
+
+
 class ReasoningArcDataset(Dataset):
     """Reasoning-Based PyTorch Dataset for training the 120.18M Cognitive Reasoner.
 
     Loads tasks from data/synthetic/train (12,000+ tasks) or held_out and transforms each
     input-output pair into an action-conditioned reasoning step with goal, mechanics,
     counterfactuals, and verification annotations.
+
+    If data_dir is empty or does not exist (e.g., in clean git-cloned environments),
+    it automatically triggers procedural task generation or in-memory synthesis.
     """
 
     def __init__(
@@ -74,6 +158,8 @@ class ReasoningArcDataset(Dataset):
         slot_dim: int = 224,
         max_slots: int = 24,
         seed: int = 42,
+        auto_generate_if_empty: bool = True,
+        num_auto_generate: int = 500,
     ) -> None:
         super().__init__()
         self.data_dir = data_dir
@@ -82,6 +168,7 @@ class ReasoningArcDataset(Dataset):
         self.slot_dim = slot_dim
         self.max_slots = max_slots
         self.rng = np.random.default_rng(seed)
+        self.in_memory_tasks: List[Dict[str, Any]] = []
 
         self.file_paths: List[str] = []
         if os.path.exists(data_dir):
@@ -94,8 +181,42 @@ class ReasoningArcDataset(Dataset):
             else:
                 self.file_paths = files
 
+        # Self-healing fallback: If no files found, auto-generate dataset
+        if len(self.file_paths) == 0 and auto_generate_if_empty:
+            p = Path(data_dir)
+            base_dir = p.parent if p.name in ("train", "held_out") else p
+            try:
+                ensure_synthetic_data(output_dir=base_dir, n_per_rule=200, n_per_pair=100, quiet=False)
+                if os.path.exists(data_dir):
+                    files = sorted(
+                        str(fp) for fp in Path(data_dir).rglob("*.json")
+                        if not fp.name.startswith(".")
+                    )
+                    if max_samples is not None and max_samples > 0:
+                        self.file_paths = files[:max_samples]
+                    else:
+                        self.file_paths = files
+            except Exception:
+                pass
+
+            # In-memory fallback if disk generation is not possible
+            if len(self.file_paths) == 0:
+                self.in_memory_tasks = self._generate_fallback_in_memory_tasks(count=num_auto_generate)
+
+    def _generate_fallback_in_memory_tasks(self, count: int = 100) -> List[Dict[str, Any]]:
+        """Generates procedural ArcTasks directly in-memory as fallback."""
+        from cir_arc.generators.single_rule import GENERATOR_REGISTRY
+        tasks: List[Dict[str, Any]] = []
+        gen_classes = list(GENERATOR_REGISTRY.values())
+        for i in range(count):
+            GenClass = gen_classes[i % len(gen_classes)]
+            gen = GenClass()
+            t = gen.generate_one(self.rng, task_id=f"inmem_synth_{i:04d}")
+            tasks.append(t.to_dict())
+        return tasks
+
     def __len__(self) -> int:
-        return len(self.file_paths)
+        return len(self.file_paths) + len(self.in_memory_tasks)
 
     def _determine_action_and_mechanics(
         self, rule_type: str, rule_params: Dict[str, Any]
@@ -172,9 +293,12 @@ class ReasoningArcDataset(Dataset):
         return scores
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
-        file_path = self.file_paths[idx]
-        with open(file_path, "r", encoding="utf-8") as f:
-            task = json.load(f)
+        if idx < len(self.file_paths):
+            file_path = self.file_paths[idx]
+            with open(file_path, "r", encoding="utf-8") as f:
+                task = json.load(f)
+        else:
+            task = self.in_memory_tasks[idx - len(self.file_paths)]
 
         rule_type = task.get("rule_type", "unknown")
         rule_params = task.get("rule_params", {})
