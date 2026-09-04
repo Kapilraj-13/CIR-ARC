@@ -393,8 +393,14 @@ class ReasoningArcDataset(Dataset):
 def collate_reasoning_batch(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Collates variable-sized reasoning task instances with explicit valid masks."""
     B = len(batch)
-    max_h = max(item["H"] for item in batch)
-    max_w = max(item["W"] for item in batch)
+    max_h = max(
+        max(item["grid_t"].shape[0], item["grid_next"].shape[0], item["goal_grid"].shape[0])
+        for item in batch
+    )
+    max_w = max(
+        max(item["grid_t"].shape[1], item["grid_next"].shape[1], item["goal_grid"].shape[1])
+        for item in batch
+    )
     slot_dim = batch[0]["slot_embeddings"].shape[-1]
     max_slots = batch[0]["slot_embeddings"].shape[0]
 

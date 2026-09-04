@@ -3,8 +3,9 @@ Phase 1 dataset generation script.
 Usage: python scripts/generate_data.py --n_per_rule 1000
 """
 import sys
-import os
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(repo_root, "src"))
+sys.path.insert(0, repo_root)
 
 import argparse
 from pathlib import Path
