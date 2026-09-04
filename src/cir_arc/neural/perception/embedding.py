@@ -38,6 +38,7 @@ class ColorEmbedding(nn.Module):
             grid = grid.long()
         else:
             grid = grid.to(torch.long)
+        grid = torch.clamp(grid, 0, self.num_colors - 1)
         return self.embedding(grid)
 
 

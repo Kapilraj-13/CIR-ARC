@@ -1,11 +1,9 @@
 """CNN stem and Multi-Scale CNN stem modules for CIR-ARC spatial feature encoding.
 
 Contains:
-1. CNNStem: Canonical 3-layer resolution-preserving encoder (54,848 parameters):
-   - Conv2d(48, 64, 3, padding=1, bias=False) + GroupNorm(8, 64) + GELU
-   - DepthwiseSeparableConv(64, 128) + GroupNorm(8, 128) + GELU
-   - DepthwiseSeparableConv(128, 128) + GroupNorm(8, 128) + GELU
-2. MultiScaleCNNStem: 4-stage hierarchical multi-scale encoder with auxiliary boundary & objectness heads.
+1. CNNStem: Canonical 3-layer resolution-preserving encoder.
+2. MultiScaleCNNStem: 4-stage hierarchical multi-scale encoder with auxiliary boundary & objectness heads,
+   generic CoordConv coordinate injection (zero hardcoded gravity bias), and dense spatial feature export.
 """
 
 from __future__ import annotations
@@ -44,65 +42,6 @@ class DepthwiseSeparableConv(nn.Module):
         x = self.norm(x)
         x = self.act(x)
         return x
-
-
-class CNNStem(nn.Module):
-    """3-layer spatial encoder preserving full grid resolution without downsampling (54,848 params).
-
-    Args:
-        in_channels: Input embedding dimension (default: 48).
-        hidden_channels: Intermediate channel dimension (default: 64).
-        out_channels: Output feature token dimension (default: 128).
-        num_groups: Number of groups for GroupNorm (default: 8).
-    """
-
-    def __init__(
-        self,
-        in_channels: int = 48,
-        hidden_channels: int = 64,
-        out_channels: int = 128,
-        num_groups: int = 8,
-    ) -> None:
-        super().__init__()
-        self.in_channels = in_channels
-        self.hidden_channels = hidden_channels
-        self.out_channels = out_channels
-
-        # Layer 1: Standard 3x3 conv with bias=False + GroupNorm + GELU
-        self.conv1 = nn.Conv2d(
-            in_channels=in_channels,
-            out_channels=hidden_channels,
-            kernel_size=3,
-            padding=1,
-            bias=False,
-        )
-        self.norm1 = nn.GroupNorm(num_groups=num_groups, num_channels=hidden_channels)
-        self.act1 = nn.GELU()
-
-        # Layer 2: Depthwise separable conv 64 -> 128
-        self.conv2 = DepthwiseSeparableConv(
-            in_channels=hidden_channels,
-            out_channels=out_channels,
-            num_groups=num_groups,
-        )
-
-        # Layer 3: Depthwise separable conv 128 -> 128
-        self.conv3 = DepthwiseSeparableConv(
-            in_channels=out_channels,
-            out_channels=out_channels,
-            num_groups=num_groups,
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Forward pass transforming channels-last embedding (B, H, W, 48) to (B, H*W, 128)."""
-        x = x.permute(0, 3, 1, 2).contiguous()
-        x = self.act1(self.norm1(self.conv1(x)))
-        x = self.conv2(x)
-        x = self.conv3(x)
-
-        B, C, H, W = x.shape
-        tokens = x.permute(0, 2, 3, 1).reshape(B, H * W, C)
-        return tokens
 
 
 class ResidualDepthwiseSeparableConv(nn.Module):
@@ -145,7 +84,10 @@ class ResidualDepthwiseSeparableConv(nn.Module):
 
 
 class MultiScaleCNNStem(nn.Module):
-    """Hierarchical multi-scale spatial encoder with auxiliary boundary & objectness heads."""
+    """Hierarchical multi-scale spatial encoder with auxiliary boundary & objectness heads.
+
+    Supports generic coordinate injection (CoordConv: row, col, border_dist) without directional bias.
+    """
 
     def __init__(
         self,
@@ -153,15 +95,19 @@ class MultiScaleCNNStem(nn.Module):
         hidden_channels: int = 64,
         out_channels: int = 128,
         num_groups: int = 8,
+        use_coordconv: bool = False,
     ) -> None:
         super().__init__()
-        self.in_channels = in_channels
+        self.raw_in_channels = in_channels
+        self.use_coordconv = use_coordconv
+        self.coord_dim = 3 if use_coordconv else 0
+        self.in_channels = in_channels + self.coord_dim
         self.hidden_channels = hidden_channels
         self.out_channels = out_channels
 
-        # Stage 1: Local features (48 -> 64)
+        # Stage 1: Local features
         self.conv1 = nn.Conv2d(
-            in_channels=in_channels,
+            in_channels=self.in_channels,
             out_channels=hidden_channels,
             kernel_size=3,
             padding=1,
@@ -170,29 +116,30 @@ class MultiScaleCNNStem(nn.Module):
         self.norm1 = nn.GroupNorm(num_groups=num_groups, num_channels=hidden_channels)
         self.act1 = nn.GELU()
 
-        # Stage 2: Medium-range features (64 -> 96)
+        # Stage 2: Medium-range features
+        mid_dim = int(hidden_channels * 1.5)
         self.stage2 = ResidualDepthwiseSeparableConv(
             in_channels=hidden_channels,
-            out_channels=96,
+            out_channels=mid_dim,
             num_groups=num_groups,
         )
 
-        # Stage 3: Broad context features (96 -> 128)
+        # Stage 3: Broad context features
         self.stage3 = ResidualDepthwiseSeparableConv(
-            in_channels=96,
+            in_channels=mid_dim,
             out_channels=out_channels,
             num_groups=num_groups,
         )
 
-        # Stage 4: Global context features (128 -> 128)
+        # Stage 4: Global context features
         self.stage4 = ResidualDepthwiseSeparableConv(
             in_channels=out_channels,
             out_channels=out_channels,
             num_groups=num_groups,
         )
 
-        # Multi-scale feature fusion: (64 + 96 + 128 + 128 = 416 -> out_channels)
-        fused_in_dim = hidden_channels + 96 + out_channels + out_channels
+        # Multi-scale feature fusion
+        fused_in_dim = hidden_channels + mid_dim + out_channels + out_channels
         self.fusion = nn.Sequential(
             nn.Conv2d(fused_in_dim, out_channels, kernel_size=1, bias=False),
             nn.GroupNorm(num_groups=num_groups, num_channels=out_channels),
@@ -217,11 +164,27 @@ class MultiScaleCNNStem(nn.Module):
             nn.Sigmoid(),
         )
 
+    def _inject_coords(self, x: torch.Tensor) -> torch.Tensor:
+        """Inject normalized coordinates: (row, col, border_distance)."""
+        B, H, W, C = x.shape
+        device = x.device
+
+        r = torch.linspace(0, 1, H, device=device).view(1, H, 1, 1).expand(B, H, W, 1)
+        c = torch.linspace(0, 1, W, device=device).view(1, 1, W, 1).expand(B, H, W, 1)
+        border_dist = torch.minimum(
+            torch.minimum(r, 1.0 - r),
+            torch.minimum(c, 1.0 - c),
+        )
+        return torch.cat([x, r, c, border_dist], dim=-1)
+
     def forward(
         self,
         x: torch.Tensor,
         return_maps: bool = False,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
+        if self.use_coordconv and x.shape[-1] == self.raw_in_channels:
+            x = self._inject_coords(x)
+
         x = x.permute(0, 3, 1, 2).contiguous()
 
         f1 = self.act1(self.norm1(self.conv1(x)))
@@ -241,3 +204,29 @@ class MultiScaleCNNStem(nn.Module):
         if return_maps:
             return tokens, boundary_map, cell_objectness
         return tokens
+
+
+class CNNStem(nn.Module):
+    """Canonical 3-layer spatial encoder preserving full grid resolution."""
+
+    def __init__(
+        self,
+        in_channels: int = 48,
+        hidden_channels: int = 64,
+        out_channels: int = 128,
+        num_groups: int = 8,
+    ) -> None:
+        super().__init__()
+        self.conv1 = nn.Conv2d(in_channels, hidden_channels, 3, padding=1, bias=False)
+        self.norm1 = nn.GroupNorm(num_groups, hidden_channels)
+        self.act1 = nn.GELU()
+        self.conv2 = DepthwiseSeparableConv(hidden_channels, out_channels, num_groups)
+        self.conv3 = DepthwiseSeparableConv(out_channels, out_channels, num_groups)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = x.permute(0, 3, 1, 2).contiguous()
+        x = self.act1(self.norm1(self.conv1(x)))
+        x = self.conv2(x)
+        x = self.conv3(x)
+        B, C, H, W = x.shape
+        return x.permute(0, 2, 3, 1).reshape(B, H * W, C)

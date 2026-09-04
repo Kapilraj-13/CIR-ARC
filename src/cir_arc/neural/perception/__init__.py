@@ -11,6 +11,8 @@ from cir_arc.neural.perception.slot_attention import SlotAttention
 from cir_arc.neural.perception.relation_encoder import SlotRelationEncoder, SetTransformerBlock
 from cir_arc.neural.perception.relation_graph import RelationalGraphHead, extract_ground_truth_relations
 from cir_arc.neural.perception.property_heads import PropertyHeads
+from cir_arc.neural.perception.affordance_head import ObjectAffordanceHead
+from cir_arc.neural.perception.pointer_head import TwoStagePointerHead
 from cir_arc.neural.perception.reconstruction import ReconstructionDecoder, SlotMaskDecoder
 
 __all__ = [
@@ -25,6 +27,8 @@ __all__ = [
     "RelationalGraphHead",
     "extract_ground_truth_relations",
     "PropertyHeads",
+    "ObjectAffordanceHead",
+    "TwoStagePointerHead",
     "ReconstructionDecoder",
     "SlotMaskDecoder",
 ]

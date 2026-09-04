@@ -1,15 +1,15 @@
 """Relational Set Transformer module for cross-object reasoning in CIR-ARC.
 
-Implements a 2-layer Set Transformer / Multi-Head Self-Attention block over slot representations:
-(B, K, slot_dim) -> (B, K, slot_dim)
+Implements a Set Transformer / Multi-Head Self-Attention block over slot representations:
+(B, K, slot_dim) -> (B, K, slot_dim) + (B, K, K, rel_dim)
 
 Allows object slots to exchange global comparative context (e.g. relative sizing, spatial ordering,
-color contrast, containment) prior to symbolic property decoding and reconstruction.
+color contrast, containment) and produces continuous pairwise relation latents for DenseLatentState.
 """
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Optional, Tuple, Union
 import torch
 import torch.nn as nn
 
@@ -56,12 +56,7 @@ class SetTransformerBlock(nn.Module):
 class SlotRelationEncoder(nn.Module):
     """Multi-layer relational encoder refining object slots via cross-slot self-attention.
 
-    Args:
-        slot_dim: Dimensionality of each slot vector (default: 128).
-        num_heads: Number of attention heads (default: 4).
-        mlp_hidden_dim: Hidden dimension of the residual MLP (default: 256).
-        num_layers: Number of stacked Set Transformer blocks (default: 2).
-        dropout: Dropout rate (default: 0.0).
+    Emits both refined slot vectors and continuous pairwise interaction tensors for DenseLatentState.
     """
 
     def __init__(
@@ -71,10 +66,12 @@ class SlotRelationEncoder(nn.Module):
         mlp_hidden_dim: int = 256,
         num_layers: int = 2,
         dropout: float = 0.0,
+        rel_dim: int = 64,
     ) -> None:
         super().__init__()
         self.slot_dim = slot_dim
         self.num_layers = num_layers
+        self.rel_dim = rel_dim
 
         self.layers = nn.ModuleList([
             SetTransformerBlock(
@@ -87,22 +84,30 @@ class SlotRelationEncoder(nn.Module):
         ])
         self.final_norm = nn.LayerNorm(slot_dim)
 
+        # Pairwise relational projection: maps (s_i, s_j, s_i - s_j) -> rel_dim
+        self.pairwise_proj = nn.Sequential(
+            nn.Linear(slot_dim * 3, mlp_hidden_dim // 2),
+            nn.GELU(),
+            nn.Linear(mlp_hidden_dim // 2, rel_dim),
+        )
+
     def forward(
         self,
         slots: torch.Tensor,
         objectness: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
+        return_pairwise: bool = False,
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         """Refines slot representations through relational self-attention.
 
         Args:
             slots: Input slot tensor of shape (B, K, slot_dim).
             objectness: Optional slot objectness scores of shape (B, K) in [0, 1].
+            return_pairwise: If True, also returns pairwise relational latent tensor (B, K, K, rel_dim).
 
         Returns:
-            Refined slot tensor of shape (B, K, slot_dim).
+            Refined slot tensor of shape (B, K, slot_dim), or (refined_slots, pairwise_latents).
         """
         x = slots
-        # Soft-weight active slots to communicate proportionally to objectness confidence
         if objectness is not None:
             obj_weight = 0.2 + 0.8 * objectness.unsqueeze(-1)
             x = x * obj_weight
@@ -110,4 +115,28 @@ class SlotRelationEncoder(nn.Module):
         for layer in self.layers:
             x = layer(x, key_padding_mask=None)
 
-        return self.final_norm(x)
+        refined_slots = self.final_norm(x)
+
+        if not return_pairwise:
+            return refined_slots
+
+        # Compute continuous pairwise interaction tensor (B, K, K, rel_dim)
+        B, K, D = refined_slots.shape
+        s_i = refined_slots.unsqueeze(2).expand(B, K, K, D)
+        s_j = refined_slots.unsqueeze(1).expand(B, K, K, D)
+        s_diff = s_i - s_j
+        pairwise_feat = torch.cat([s_i, s_j, s_diff], dim=-1)
+        pairwise_latents = self.pairwise_proj(pairwise_feat)
+
+        return refined_slots, pairwise_latents
+
+
+if __name__ == "__main__":
+    enc = SlotRelationEncoder(slot_dim=128, rel_dim=64)
+    x = torch.randn(2, 24, 128)
+    out = enc(x)
+    assert out.shape == (2, 24, 128)
+    out, p = enc(x, return_pairwise=True)
+    assert out.shape == (2, 24, 128)
+    assert p.shape == (2, 24, 24, 64)
+    print("SlotRelationEncoder verified successfully!")

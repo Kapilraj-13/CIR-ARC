@@ -64,10 +64,15 @@ class SlotMaskDecoder(nn.Module):
         device = slots.device
 
         # Generate 2D coordinate embeddings
-        rows = torch.arange(H, device=device)
-        cols = torch.arange(W, device=device)
-        r_emb = self.row_embed(rows).unsqueeze(1).expand(H, W, -1)  # (H, W, 64)
-        c_emb = self.col_embed(cols).unsqueeze(0).expand(H, W, -1)  # (H, W, 64)
+        if H > self.max_h or W > self.max_w:
+            r_idx = torch.linspace(0, self.max_h - 1, H, device=device).round().long()
+            c_idx = torch.linspace(0, self.max_w - 1, W, device=device).round().long()
+        else:
+            r_idx = torch.arange(H, device=device)
+            c_idx = torch.arange(W, device=device)
+
+        r_emb = self.row_embed(r_idx).unsqueeze(1).expand(H, W, -1)  # (H, W, 64)
+        c_emb = self.col_embed(c_idx).unsqueeze(0).expand(H, W, -1)  # (H, W, 64)
         pos = torch.cat([r_emb, c_emb], dim=-1)                      # (H, W, 128)
         pos_flat = pos.reshape(1, 1, H * W, D).expand(B, K, -1, -1)  # (B, K, H*W, D)
 
@@ -138,19 +143,19 @@ class ReconstructionDecoder(nn.Module):
         Returns:
             Color logits tensor of shape (B, H, W, num_colors).
         """
-        if H > self.max_h or W > self.max_w:
-            raise ValueError(
-                f"Grid dimension ({H}, {W}) exceeds maximum allowed ({self.max_h}, {self.max_w})"
-            )
-
         B, K, D = slots.shape
         device = slots.device
 
         # Generate 2D coordinate queries from row and column embeddings
-        rows = torch.arange(H, device=device)
-        cols = torch.arange(W, device=device)
-        r_emb = self.row_embed(rows).unsqueeze(1).expand(H, W, -1)  # (H, W, 64)
-        c_emb = self.col_embed(cols).unsqueeze(0).expand(H, W, -1)  # (H, W, 64)
+        if H > self.max_h or W > self.max_w:
+            r_idx = torch.linspace(0, self.max_h - 1, H, device=device).round().long()
+            c_idx = torch.linspace(0, self.max_w - 1, W, device=device).round().long()
+        else:
+            r_idx = torch.arange(H, device=device)
+            c_idx = torch.arange(W, device=device)
+
+        r_emb = self.row_embed(r_idx).unsqueeze(1).expand(H, W, -1)  # (H, W, 64)
+        c_emb = self.col_embed(c_idx).unsqueeze(0).expand(H, W, -1)  # (H, W, 64)
         pos = torch.cat([r_emb, c_emb], dim=-1)                      # (H, W, 128)
 
         # Reshape to batch queries: (B, H*W, slot_dim)

@@ -15,6 +15,15 @@ class ActionType(IntEnum):
     ACTION6 = 6  # Parameterized Click (x, y)
     ACTION7 = 7  # Undo
 
+    # Semantic aliases
+    UP = 1
+    DOWN = 2
+    LEFT = 3
+    RIGHT = 4
+    INTERACT = 5
+    CLICK = 6
+    UNDO = 7
+
 
 ACTION_NAMES: Dict[int, str] = {
     0: "RESET",

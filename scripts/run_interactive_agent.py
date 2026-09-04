@@ -28,22 +28,25 @@ logging.basicConfig(
 logger = logging.getLogger("CIR-ARC-Interactive")
 
 
-def parse_args():
+def main():
     parser = argparse.ArgumentParser(description="Run CIR-ARC Interactive Solving Runtime")
-    parser.add_argument("--game_id", type=str, default="mock_maze_01", help="Game ID to solve")
-    parser.add_argument("--max_actions", type=int, default=80, help="Maximum action budget")
+    parser.add_argument("--game_id", type=str, default="m0r0", help="Game ID to solve (e.g. m0r0, mock_maze_01)")
+    parser.add_argument("--engine", type=str, default="auto", choices=["auto", "rc", "mock"], help="Engine backend")
+    parser.add_argument("--max_actions", type=int, default=150, help="Maximum action budget")
     parser.add_argument("--record", action="store_true", default=True, help="Record session to .recording.jsonl")
     parser.add_argument("--output_dir", type=str, default="recordings", help="Output directory for recordings")
-    return parser.parse_args()
+    args = parser.parse_args()
 
-
-def main():
-    args = parse_args()
     logger.info("Initializing game environment: %s", args.game_id)
-    env = MockEngine(game_id=args.game_id)
+    if args.engine == "mock" or (args.engine == "auto" and args.game_id.startswith("mock_")):
+        from cir_arc.environment.mock_engine import MockEngine
+        env = MockEngine(game_id=args.game_id)
+    else:
+        from cir_arc.environment.rc_adapter import RCEngineAdapter
+        env = RCEngineAdapter(game_id=args.game_id)
 
     runtime = SolvingRuntime(max_actions=args.max_actions, record=args.record)
-    logger.info("Starting Cognitive Loop Solving Runtime (Max Actions: %d)...", args.max_actions)
+    logger.info("Starting Cognitive Loop Solving Runtime on %s (Max Actions: %d)...", args.game_id, args.max_actions)
 
     scorecard = runtime.run_game(env)
 

@@ -1,8 +1,9 @@
-"""Trainer module and PerceptionModel integration for CIR-ARC Phase 2.
+"""Trainer module and PerceptionModel integration for CIR-ARC Phase 2 / 2.5.
 
 Encapsulates:
 1. PerceptionModel: Full neural perception model (Embedding -> MultiScale CNN -> Proposal Slot Attention
-   -> Relational Set Transformer -> PropertyHeads -> ReconstructionDecoder).
+   -> Relational Set Transformer -> PropertyHeads -> ReconstructionDecoder) with optional v2 Dual
+   Neuro-Symbolic modules (ObjectAffordanceHead, TwoStagePointerHead, ActionConditionedTransitionModel).
 2. Trainer: Multi-objective training loop with AdamW optimizer, CosineAnnealingLR,
    gradient clipping, and checkpoint persistence.
 """
@@ -25,7 +26,26 @@ from cir_arc.neural.perception.relation_encoder import SlotRelationEncoder
 from cir_arc.neural.perception.property_heads import PropertyHeads
 from cir_arc.neural.perception.reconstruction import ReconstructionDecoder
 from cir_arc.neural.perception.relation_graph import extract_ground_truth_relations
-from cir_arc.neural.world_state import StructuredObject, SpatialRelation, RelationGraph, WorldState
+from cir_arc.neural.perception.affordance_head import ObjectAffordanceHead
+from cir_arc.neural.perception.pointer_head import TwoStagePointerHead
+from cir_arc.neural.temporal.transition import ActionConditionedTransitionModel, OnlineMechanicsTracker
+from cir_arc.neural.temporal.event_encoder import CategoricalEventEncoder, TemporalEventMemory
+from cir_arc.neural.world_state import (
+    StructuredObject,
+    SpatialRelation,
+    RelationGraph,
+    WorldState,
+    DenseLatentState,
+    SymbolicSceneState,
+    HybridSceneState,
+    MechanicsBelief,
+    ActionEffect,
+    SemanticEvent,
+    GlobalStateData,
+    UncertaintySummary,
+    AFFORDANCE_NAMES,
+    RELATION_TYPES,
+)
 from cir_arc.neural.losses.reconstruction import reconstruction_loss
 from cir_arc.neural.losses.property import (
     color_loss,
@@ -43,15 +63,16 @@ from cir_arc.neural.losses.diversity import diversity_loss, objectness_sparsity_
 
 
 class PerceptionModel(nn.Module):
-    """End-to-end multi-scale neural perception model for CIR-ARC Phase 2.
+    """End-to-end multi-scale neural perception model for CIR-ARC Phase 2 / 2.5.
 
     Chains:
     1. ColorEmbedding: (B, H, W) -> (B, H, W, embed_dim)
-    2. MultiScaleCNNStem: (B, H, W, embed_dim) -> (B, H*W, 128) + (boundary_map, cell_objectness)
-    3. ProposalSlotAttention: (B, H*W, 128) -> slots (B, 24, 128), objectness (B, 24), attn (B, 24, H*W)
-    4. SlotRelationEncoder: (B, 24, 128) -> refined_slots (B, 24, 128)
-    5. PropertyHeads: refined_slots -> {color, shape, size, position, orientation, symmetry}
+    2. MultiScaleCNNStem: (B, H, W, embed_dim) -> (B, H*W, feat_dim) + (boundary_map, cell_objectness)
+    3. ProposalSlotAttention: (B, H*W, feat_dim) -> slots (B, 24, slot_dim), objectness (B, 24), attn (B, 24, H*W)
+    4. SlotRelationEncoder: (B, 24, slot_dim) -> refined_slots + pairwise relational latents
+    5. PropertyHeads: refined_slots -> {color, shape, size, position, orientation, symmetry, extent, has_holes}
     6. ReconstructionDecoder: refined_slots -> color logits (B, H, W, 10)
+    7. Optional v2 heads: ObjectAffordanceHead, TwoStagePointerHead, ActionConditionedTransitionModel
     """
 
     def __init__(
@@ -73,12 +94,16 @@ class PerceptionModel(nn.Module):
         num_orientations: int = 4,
         num_symmetries: int = 4,
         recon_num_colors: int = 10,
+        use_coordconv: bool = False,
+        include_v2_modules: bool = False,
     ) -> None:
         super().__init__()
         self.n_slots = n_slots
         self.slot_dim = slot_dim
+        self.feat_dim = feat_dim
         self.max_h = max_h
         self.max_w = max_w
+        self.include_v2_modules = include_v2_modules
 
         # 1. Color Embedding
         self.embedding = ColorEmbedding(
@@ -86,11 +111,12 @@ class PerceptionModel(nn.Module):
             embed_dim=embed_dim,
         )
 
-        # 2. Multi-Scale CNN Feature Stem
+        # 2. Multi-Scale CNN Feature Stem (with optional CoordConv)
         self.cnn_stem = MultiScaleCNNStem(
             in_channels=embed_dim,
             hidden_channels=stem_hidden_dim,
             out_channels=stem_out_dim,
+            use_coordconv=use_coordconv,
         )
 
         # 3. Proposal-guided Slot Attention
@@ -111,6 +137,7 @@ class PerceptionModel(nn.Module):
             mlp_hidden_dim=256,
             num_layers=relation_layers,
             dropout=0.0,
+            rel_dim=64,
         )
 
         # 5. Symbolic Property Prediction Heads
@@ -121,6 +148,7 @@ class PerceptionModel(nn.Module):
             num_shapes=num_shapes,
             num_orientations=num_orientations,
             num_symmetries=num_symmetries,
+            include_extent=include_v2_modules,
         )
 
         # 6. Spatial Reconstruction Decoder
@@ -130,6 +158,28 @@ class PerceptionModel(nn.Module):
             max_w=max_w,
             num_colors=recon_num_colors,
         )
+
+        # 7. Optional v2 Modules
+        if include_v2_modules:
+            self.affordance_head = ObjectAffordanceHead(
+                slot_dim=slot_dim,
+                hidden_dim=prop_hidden_dim * 2,
+            )
+            self.pointer_head = TwoStagePointerHead(
+                slot_dim=slot_dim,
+                feat_dim=feat_dim,
+                hidden_dim=128,
+            )
+            self.transition_model = ActionConditionedTransitionModel(slot_dim=slot_dim)
+        else:
+            self.affordance_head = None
+            self.pointer_head = None
+            self.transition_model = None
+
+        # 8. Temporal and mechanics inference helpers
+        self.event_encoder = CategoricalEventEncoder()
+        self.mechanics_tracker = OnlineMechanicsTracker()
+        self._prev_objects: Optional[List[StructuredObject]] = None
 
     def forward(
         self,
@@ -143,7 +193,8 @@ class PerceptionModel(nn.Module):
             mask: Optional Tensor of shape (B, H, W) or (B, H*W) with 1.0/True at valid cells.
 
         Returns:
-            Dict containing slots, objectness, attn_maps, boundary_map, cell_objectness, props, recon_logits.
+            Dict containing slots, objectness, attn_maps, boundary_map, cell_objectness,
+            props, affordances, pairwise_latents, and recon_logits.
         """
         B, H, W = grid.shape
 
@@ -165,13 +216,23 @@ class PerceptionModel(nn.Module):
             cell_objectness=cell_objectness,
         )
 
-        # Step 4: Relational Set Transformer refinement
-        refined_slots = self.relation_encoder(slots, objectness=objectness)
+        # Step 4: Relational Set Transformer refinement + continuous pairwise latents
+        refined_slots, pairwise_latents = self.relation_encoder(
+            slots,
+            objectness=objectness,
+            return_pairwise=True,
+        )
 
         # Step 5: Symbolic property prediction
         props = self.property_heads(refined_slots)
 
-        # Step 6: Reconstruction decoder back to 2D grid logits
+        # Step 6: Object affordance prediction
+        if self.affordance_head is not None:
+            affordances = self.affordance_head(refined_slots, return_probs=True)
+        else:
+            affordances = None
+
+        # Step 7: Reconstruction decoder back to 2D grid logits
         recon_logits = self.decoder(
             refined_slots,
             H=H,
@@ -181,22 +242,26 @@ class PerceptionModel(nn.Module):
         return {
             "slots": refined_slots,
             "raw_slots": slots,
+            "spatial_tokens": tokens,
+            "pairwise_latents": pairwise_latents,
             "objectness": objectness,
             "attn_maps": attn_maps,
             "boundary_map": boundary_map,
             "cell_objectness": cell_objectness,
             "props": props,
+            "affordances": affordances,
             "recon_logits": recon_logits,
         }
 
-    def to_world_state(
+    def to_hybrid_scene_state(
         self,
         grid: Union[torch.Tensor, np.ndarray],
         obj_threshold: float = 0.4,
         rel_threshold: float = 0.5,
         frame_index: int = 0,
-    ) -> WorldState:
-        """Translates a raw 2D ARC grid into a complete, structured WorldState dataclass."""
+        action_id: Optional[int] = None,
+    ) -> HybridSceneState:
+        """Translates a raw 2D ARC grid into the Dual Neuro-Symbolic HybridSceneState."""
         self.eval()
         device = next(self.parameters()).device
 
@@ -214,18 +279,31 @@ class PerceptionModel(nn.Module):
         with torch.no_grad():
             out = self.forward(grid_t)
 
-        slots = out["slots"][0].cpu().numpy()                       # (K, D)
+        slots_tensor = out["slots"][0]                               # (K, D)
+        spatial_tokens = out["spatial_tokens"][0]                   # (H*W, feat_dim)
+        pairwise_tensor = out["pairwise_latents"][0]                 # (K, K, rel_dim)
+
+        slots = slots_tensor.cpu().numpy()                           # (K, D)
         objectness = out["objectness"][0].cpu().numpy()             # (K,)
         props = out["props"]
+
         colors = props["color"][0].argmax(dim=-1).cpu().numpy()     # (K,)
         positions = props["position"][0].cpu().numpy()              # (K, 2)
         sizes = props["size"][0].cpu().numpy().reshape(-1)          # (K,)
         shapes = props["shape"][0].argmax(dim=-1).cpu().numpy()     # (K,)
         orientations = props["orientation"][0].argmax(dim=-1).cpu().numpy() # (K,)
         symmetries = (torch.sigmoid(props["symmetry"][0]) >= 0.5).cpu().numpy() # (K, 4)
+        extents = props["extent"][0].cpu().numpy()                  # (K, 4)
+        has_holes_arr = (torch.sigmoid(props["has_holes"][0]) >= 0.5).cpu().numpy().reshape(-1)
+
         attn_maps = out["attn_maps"][0].cpu().numpy().reshape(self.n_slots, H, W) # (K, H, W)
 
-        # Construct StructuredObject list for active slots
+        if out["affordances"] is not None:
+            affordances_t = out["affordances"][0].cpu().numpy()
+        else:
+            affordances_t = np.full((self.n_slots, len(AFFORDANCE_NAMES)), 0.5, dtype=np.float32)
+
+        # 1. Construct StructuredObject instances
         objects: List[StructuredObject] = []
         arc_objects: List[ArcObject] = []
 
@@ -234,7 +312,6 @@ class PerceptionModel(nn.Module):
             if conf < obj_threshold:
                 continue
 
-            # Compute exact bounding box and pixels from slot spatial attention map
             slot_attn = attn_maps[k]
             peak = float(slot_attn.max()) if slot_attn.size > 0 else 0.0
             thresh = max(peak * 0.4, 0.1)
@@ -242,7 +319,6 @@ class PerceptionModel(nn.Module):
 
             active_pixels = np.argwhere(slot_mask)
             if len(active_pixels) == 0:
-                # Fallback to centroid point
                 r_c = int(np.clip(positions[k, 0] * (H - 1), 0, H - 1))
                 c_c = int(np.clip(positions[k, 1] * (W - 1), 0, W - 1))
                 active_pixels = np.array([[r_c, c_c]])
@@ -256,6 +332,17 @@ class PerceptionModel(nn.Module):
             area = float(len(active_pixels) / max(H * W, 1))
             perimeter = float(2 * (width + height))
             aspect_ratio = float(width / max(height, 1e-4))
+
+            min_r_int = int(active_pixels[:, 0].min())
+            min_c_int = int(active_pixels[:, 1].min())
+            max_r_int = int(active_pixels[:, 0].max())
+            max_c_int = int(active_pixels[:, 1].max())
+
+            obj_affordances = {
+                name: float(affordances_t[k, i])
+                for i, name in enumerate(AFFORDANCE_NAMES)
+                if i < affordances_t.shape[1]
+            }
 
             obj = StructuredObject(
                 slot_id=k,
@@ -271,23 +358,23 @@ class PerceptionModel(nn.Module):
                 shape_class=int(shapes[k]),
                 orientation=int(orientations[k]),
                 symmetries=(bool(symmetries[k, 0]), bool(symmetries[k, 1]), bool(symmetries[k, 2]), bool(symmetries[k, 3])),
-                has_holes=False,
+                has_holes=bool(has_holes_arr[k]),
+                extent_box=(min_r_int, min_c_int, max_r_int, max_c_int),
+                affordances=obj_affordances,
                 mask=slot_mask,
                 identity_vector=slots[k, :64],
+                raw_slot_vector=slots[k],
             )
             objects.append(obj)
 
-            # Construct ArcObject for exact relational graph computation
             arc_obj = ArcObject(
                 color=int(colors[k]),
                 pixels=active_pixels,
             )
             arc_objects.append(arc_obj)
 
-        # Compute exact 14-predicate Relational Graph from detected objects
+        # 2. Extract Relational Graph
         gt_rel_mat = extract_ground_truth_relations(arc_objects, H=H, W=W)
-        from cir_arc.neural.world_state import RELATION_TYPES
-
         active_relations: List[SpatialRelation] = []
         for i in range(gt_rel_mat.shape[0]):
             for j in range(gt_rel_mat.shape[1]):
@@ -312,12 +399,72 @@ class PerceptionModel(nn.Module):
             edge_list=active_relations,
         )
 
-        return WorldState(
+        # 3. Detect Categorical Events
+        events: List[SemanticEvent] = []
+        if self._prev_objects is not None:
+            events = self.event_encoder.encode_events(
+                prev_objects=self._prev_objects,
+                curr_objects=objects,
+                step=frame_index,
+                action_id=action_id,
+            )
+            if action_id is not None:
+                self.mechanics_tracker.update_from_transition(
+                    action_id=action_id,
+                    prev_objects=self._prev_objects,
+                    curr_objects=objects,
+                )
+
+        self._prev_objects = objects
+
+        # 4. Assemble Dense Latent State
+        dense_state = DenseLatentState(
+            slot_embeddings=slots_tensor,
+            spatial_features=spatial_tokens,
+            pairwise_relational_latents=pairwise_tensor,
+            global_scene_vector=spatial_tokens.mean(dim=0),
+        )
+
+        # 5. Assemble Symbolic Scene State
+        action_effects = self.mechanics_tracker.compute_action_effects()
+        symbolic_state = SymbolicSceneState(
+            frame_index=frame_index,
+            grid_shape=(H, W),
             objects=objects,
             relations=active_relations,
-            relation_graph=relation_graph,
-            raw_grid=raw_grid_np,
+            scene_graph=relation_graph,
+            events=events,
+            global_state=GlobalStateData(level_index=0),
+            action_effects=action_effects,
+            mechanics_beliefs=self.mechanics_tracker.belief,
+            uncertainties=UncertaintySummary(
+                mean_object_confidence=float(np.mean([o.confidence for o in objects])) if objects else 1.0,
+                mean_relation_confidence=float(np.mean([r.confidence for r in active_relations])) if active_relations else 1.0,
+            ),
+        )
+
+        return HybridSceneState(
+            frame_index=frame_index,
             grid_shape=(H, W),
+            raw_grid=raw_grid_np,
+            symbolic=symbolic_state,
+            dense=dense_state,
+            boundary_map=out["boundary_map"][0].cpu().numpy(),
+            cell_objectness=out["cell_objectness"][0].cpu().numpy(),
+        )
+
+    def to_world_state(
+        self,
+        grid: Union[torch.Tensor, np.ndarray],
+        obj_threshold: float = 0.4,
+        rel_threshold: float = 0.5,
+        frame_index: int = 0,
+    ) -> WorldState:
+        """Backward-compatible wrapper returning HybridSceneState (aliased to WorldState)."""
+        return self.to_hybrid_scene_state(
+            grid=grid,
+            obj_threshold=obj_threshold,
+            rel_threshold=rel_threshold,
             frame_index=frame_index,
         )
 
@@ -396,14 +543,7 @@ class Trainer:
         return float(self.optimizer.param_groups[0]["lr"])
 
     def train_step(self, batch: Dict[str, Any]) -> Dict[str, float]:
-        """Perform a single forward and backward optimization step.
-
-        Args:
-            batch: Dictionary containing input_grids, input_masks, gt_objects, boundary_targets, etc.
-
-        Returns:
-            Dict of float loss metrics.
-        """
+        """Perform a single forward and backward optimization step."""
         grids = batch["input_grids"] if "input_grids" in batch else batch["grid"]
         masks = batch.get("input_masks") if "input_masks" in batch else batch.get("mask")
         gt_objects = batch.get("gt_objects") if "gt_objects" in batch else batch.get("objects", [])
@@ -423,7 +563,6 @@ class Trainer:
         self.model.train()
         self.optimizer.zero_grad()
 
-        # Forward pass
         outputs = self.model(grids, mask=masks)
         slots = outputs["slots"]
         objectness = outputs["objectness"]

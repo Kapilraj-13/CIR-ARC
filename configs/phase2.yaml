@@ -1,5 +1,5 @@
-# CIR-ARC Phase 2 Configuration
-# Object-Centric Multi-Scale Slot Attention Perception
+# CIR-ARC Phase 2 / 2.5 Configuration
+# Dual Neuro-Symbolic Multi-Scale Slot Perception & World-State v2
 
 model:
   num_colors: 11          # 0-9 ARC discrete colors + 10 mask/padding token
@@ -20,6 +20,38 @@ model:
   num_orientations: 4     # Orientation bins (0, 90, 180, 270 degrees)
   num_symmetries: 4       # Binary symmetry axes
   recon_num_colors: 10    # Target output colors (0-9)
+  use_coordconv: true     # Generic coordinate injection (row, col, border_dist)
+
+# Incremental Staged Scaling Profiles
+scaling_tiers:
+  stage_a_935k:
+    stem_hidden_dim: 64
+    stem_out_dim: 128
+    slot_dim: 128
+    feat_dim: 128
+    relation_layers: 2
+    relation_heads: 4
+  stage_b_1_5m:
+    stem_hidden_dim: 80
+    stem_out_dim: 144
+    slot_dim: 144
+    feat_dim: 144
+    relation_layers: 3
+    relation_heads: 4
+  stage_c_2_5m:
+    stem_hidden_dim: 96
+    stem_out_dim: 192
+    slot_dim: 192
+    feat_dim: 192
+    relation_layers: 4
+    relation_heads: 6
+  stage_d_3_5m:
+    stem_hidden_dim: 112
+    stem_out_dim: 224
+    slot_dim: 224
+    feat_dim: 224
+    relation_layers: 4
+    relation_heads: 8
 
 training:
   learning_rate: 0.001
@@ -50,5 +82,5 @@ data:
   max_grid_dim: 30
 
 experiment:
-  name: "phase2_multiscale_slot_perception"
+  name: "phase2_multiscale_slot_perception_v2"
   checkpoint_dir: "checkpoints/phase2"
