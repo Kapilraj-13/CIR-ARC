@@ -1,7 +1,8 @@
 """
-Training and Evaluation runner for Phase 2 Neural Perception on ARC tasks.
-Usage:
-    python scripts/train_perception.py --config configs/phase2.yaml --epochs 30
+Training and Evaluation runner for Phase 2 / 2.5 Neural Perception on ARC tasks.
+
+Supports direct training of the 3.4M parameter PerceptionModel v2:
+    python scripts/train_perception.py --tier stage_d_3_5m --epochs 30
 """
 
 from __future__ import annotations
@@ -28,6 +29,13 @@ from cir_arc.neural.evaluation.perception_metrics import compute_perception_metr
 def parse_args():
     parser = argparse.ArgumentParser(description="Train CIR-ARC Perception Model")
     parser.add_argument("--config", type=str, default="configs/phase2.yaml", help="Path to config yaml")
+    parser.add_argument(
+        "--tier",
+        type=str,
+        default="stage_d_3_5m",
+        choices=["stage_a_935k", "stage_b_1_5m", "stage_c_2_5m", "stage_d_3_5m"],
+        help="Target scaling tier (default: stage_d_3_5m for direct ~3.4M model training)",
+    )
     parser.add_argument("--epochs", type=int, default=None, help="Override epoch count")
     parser.add_argument("--batch_size", type=int, default=None, help="Override batch size")
     parser.add_argument("--lr", type=float, default=None, help="Override learning rate")
@@ -83,6 +91,12 @@ def main():
     args = parse_args()
     config = load_config(args.config)
 
+    # Apply scaling tier overrides
+    tier_name = args.tier
+    tier_cfg = config.get("scaling_tiers", {}).get(tier_name, {})
+    model_cfg = dict(config.get("model", {}))
+    model_cfg.update(tier_cfg)
+
     # CLI Overrides
     if args.device:
         config.setdefault("training", {})["device"] = args.device
@@ -93,21 +107,22 @@ def main():
     if args.epochs:
         config.setdefault("training", {})["epochs"] = args.epochs
 
-    exp_name = args.exp_name or config.get("experiment", {}).get("name", "phase2_perception")
+    exp_name = args.exp_name or f"phase2_v2_{tier_name}"
     checkpoint_dir = Path(args.checkpoint_dir) / exp_name
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
     device_str = config.get("training", {}).get("device", "cuda" if torch.cuda.is_available() else "cpu")
     device = torch.device("cuda" if torch.cuda.is_available() and device_str == "cuda" else "cpu")
-    print(f"=== CIR-ARC Phase 2 Perception Training [{exp_name}] ===")
+    print(f"=== CIR-ARC Perception v2 Training [{exp_name}] ===")
     print(f"Target execution device: {device}")
+    print(f"Selected model tier:     {tier_name}")
 
     # Dataset loading
     train_dir = args.data_dir
     held_out_dir = args.held_out_dir
 
     if not os.path.exists(train_dir):
-        print(f"Warning: Train dataset directory '{train_dir}' not found. Generating sample data...")
+        print(f"Notice: Train dataset directory '{train_dir}' not found. Generating sample ARC data...")
         from cir_arc.generators.single_rule import GENERATOR_REGISTRY
         os.makedirs(train_dir, exist_ok=True)
         for name, GenCls in GENERATOR_REGISTRY.items():
@@ -122,7 +137,6 @@ def main():
     val_ds = SyntheticArcDataset(data_dir=held_out_dir) if (os.path.exists(held_out_dir) and len(os.listdir(held_out_dir)) > 0) else None
 
     if val_ds is None or len(val_ds) == 0:
-        # Automatically split 20% of train_ds for validation so validation metrics are ALWAYS evaluated
         if len(train_ds) > 10:
             val_size = max(int(0.2 * len(train_ds)), 1)
             train_size = len(train_ds) - val_size
@@ -136,7 +150,7 @@ def main():
         print(f"Loaded {len(train_ds)} training examples.")
         print(f"Loaded {len(val_ds)} validation examples.")
 
-    batch_size = config.get("training", {}).get("batch_size", 16)
+    batch_size = config.get("training", {}).get("batch_size", 32)
     num_workers = config.get("training", {}).get("num_workers", 0)
 
     train_loader = DataLoader(
@@ -158,26 +172,31 @@ def main():
         else None
     )
 
-    # Initialize model and trainer
-    model_cfg = config.get("model", {})
+    # Initialize model
     model = PerceptionModel(
         num_colors=model_cfg.get("num_colors", 11),
         embed_dim=model_cfg.get("embed_dim", 48),
-        hidden_channels=model_cfg.get("stem_hidden_dim", 64),
-        stem_out_dim=model_cfg.get("stem_out_dim", 128),
+        stem_hidden_dim=model_cfg.get("stem_hidden_dim", 112),
+        stem_out_dim=model_cfg.get("stem_out_dim", 224),
         n_slots=model_cfg.get("n_slots", 24),
-        slot_dim=model_cfg.get("slot_dim", 128),
+        slot_dim=model_cfg.get("slot_dim", 224),
+        feat_dim=model_cfg.get("feat_dim", 224),
         n_iter=model_cfg.get("n_iter", 3),
-        relation_layers=model_cfg.get("relation_layers", 2),
-        relation_heads=model_cfg.get("relation_heads", 4),
-        prop_hidden_dim=model_cfg.get("prop_hidden_dim", 64),
+        relation_layers=model_cfg.get("relation_layers", 4),
+        relation_heads=model_cfg.get("relation_heads", 8),
+        max_h=model_cfg.get("max_h", 30),
+        max_w=model_cfg.get("max_w", 30),
+        prop_hidden_dim=model_cfg.get("prop_hidden_dim", 96),
         num_shapes=model_cfg.get("num_shapes", 8),
         num_orientations=model_cfg.get("num_orientations", 4),
         num_symmetries=model_cfg.get("num_symmetries", 4),
+        recon_num_colors=model_cfg.get("recon_num_colors", 10),
+        use_coordconv=model_cfg.get("use_coordconv", True),
+        include_v2_modules=True,
     )
 
     param_count = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"Model parameters: {param_count:,}")
+    print(f"Initialized Model Parameters: {param_count:,} ({param_count/1e6:.2f}M)")
 
     trainer = Trainer(model=model, config=config, device=device)
 
@@ -212,10 +231,8 @@ def main():
 
         current_lr = trainer.step_scheduler()
         log_str += f" | LR: {current_lr:.5f}"
-
         print(log_str)
 
-        # Periodic save
         if epoch % 5 == 0 or epoch == epochs:
             ckpt_path = checkpoint_dir / f"checkpoint_epoch_{epoch:03d}.pt"
             trainer.save_checkpoint(str(ckpt_path))
