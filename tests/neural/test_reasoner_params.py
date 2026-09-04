@@ -243,3 +243,57 @@ def test_reasoning_arc_dataset_integration():
     assert out["goals"].shape == (2, config.num_goal_hypotheses, config.d_model)
 
 
+def test_reasoner_metrics_tracker():
+    """Verify ReasonerMetricsTracker correctly aggregates F1, accuracy, losses, and ARC-AGI scorecards."""
+    from cir_arc.neural.evaluation.reasoner_metrics import ReasonerMetricsTracker
+
+    tracker = ReasonerMetricsTracker()
+    tracker.reset()
+
+    # 1. Update running losses
+    tracker.update_losses({
+        "total_loss": torch.tensor(2.45),
+        "loss_action": torch.tensor(1.10),
+        "loss_verify": torch.tensor(0.35),
+    })
+
+    # 2. Update batch predictions and targets
+    B = 4
+    d_model = 768
+    outputs = {
+        "cognitive_state": torch.randn(B, d_model),
+        "action_logits": torch.tensor([[10.0, 0.0, 0.0], [0.0, 10.0, 0.0], [0.0, 0.0, 10.0], [10.0, 0.0, 0.0]]),
+        "prediction_error": torch.tensor([[2.0], [-2.0], [2.0], [-2.0]]),  # sigmoid -> [1, 0, 1, 0]
+        "goals": torch.randn(B, 4, d_model),
+        "candidate_scores": torch.tensor([[0.9, 0.1], [0.2, 0.8], [0.7, 0.3], [0.4, 0.6]]),
+        "predicted_next_latent": torch.randn(B, d_model),
+    }
+    targets = {
+        "target_action_id": torch.tensor([0, 1, 1, 0]),  # 3 correct top1 (0, 1, 0), 1 incorrect (1 != 2)
+        "target_is_error": torch.tensor([[1.0], [0.0], [0.0], [0.0]]),   # TP=1, FP=1, TN=2, FN=0
+        "target_goal_latent": outputs["goals"][:, 0].clone(),             # Perfect cosine similarity = 1.0
+        "optimal_action_mask": torch.tensor([[1.0, 0.0], [0.0, 1.0], [1.0, 0.0], [0.0, 1.0]]),
+        "target_next_latent": outputs["predicted_next_latent"].clone(),    # MSE = 0.0
+    }
+
+    tracker.update_batch(outputs, targets)
+    tracker.update_grid_matches(exact_matches=3, total_grids=4)
+
+    metrics = tracker.compute()
+
+    assert "total_loss" in metrics
+    assert metrics["action_accuracy"] == 0.75  # 3 / 4
+    assert metrics["action_macro_f1"] > 0.0
+    assert metrics["verification_accuracy"] == 0.75  # (1 TP + 2 TN) / 4
+    assert metrics["verification_precision"] == 0.5   # 1 / (1 + 1)
+    assert metrics["verification_recall"] == 1.0      # 1 / (1 + 0)
+    assert metrics["verification_f1"] > 0.0
+    assert abs(metrics["goal_cosine_similarity"] - 1.0) < 1e-4
+    assert metrics["counterfactual_ranking_accuracy"] == 1.0
+    assert abs(metrics["dynamics_latent_mse"]) < 1e-5
+    assert metrics["exact_grid_match_rate"] == 0.75
+
+    # Verify formatted scorecard printing does not raise
+    tracker.print_scorecard(epoch=1)
+
+

@@ -8,6 +8,10 @@ from cir_arc.neural.evaluation.perception_metrics import (
     size_mae,
     compute_perception_metrics,
 )
+from cir_arc.neural.evaluation.reasoner_metrics import (
+    ReasonerMetricsTracker,
+    compute_f1_from_confusion,
+)
 
 __all__ = [
     "reconstruction_accuracy",
@@ -16,4 +20,6 @@ __all__ = [
     "position_mae",
     "size_mae",
     "compute_perception_metrics",
+    "ReasonerMetricsTracker",
+    "compute_f1_from_confusion",
 ]
