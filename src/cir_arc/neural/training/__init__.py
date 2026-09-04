@@ -6,6 +6,11 @@ from cir_arc.neural.training.dataset import (
     SyntheticDataset,
     collate_variable_grids,
 )
+from cir_arc.neural.training.reasoning_dataset import (
+    ReasoningArcDataset,
+    collate_reasoning_batch,
+    ensure_synthetic_data,
+)
 
 __all__ = [
     "PerceptionModel",
@@ -13,4 +18,8 @@ __all__ = [
     "SyntheticArcDataset",
     "SyntheticDataset",
     "collate_variable_grids",
+    "ReasoningArcDataset",
+    "collate_reasoning_batch",
+    "ensure_synthetic_data",
 ]
+
