@@ -1,0 +1,109 @@
+# CIR-ARC Phase 4 Configuration
+# Direct Cognitive Reasoner (~120.18M) Architecture & Kaggle Training Blueprint
+# Note: Model training is strictly prohibited locally. This configuration governs Phase 4 on Kaggle.
+
+model:
+  target_params: "120.18M"
+  d_model: 768
+  n_layers: 18
+  n_q_heads: 12
+  n_kv_heads: 4                 # Grouped-Query Attention (3 Q heads per KV head)
+  head_dim: 64
+  d_ff: 1856                    # SwiGLU hidden dim calibrated for exact 120,179,360 params
+  rms_norm_eps: 1e-6
+  rope_base: 10000.0
+  max_context_len: 8192
+  dropout: 0.0
+
+memory:
+  num_reasoning_tokens: 128     # Ephemeral reasoning workspace R_t rewritten per pass
+  num_wm_tokens: 128            # Persistent working memory M_t across timesteps
+  retrieval_dim: 256            # Episodic memory key projection
+  episodic_top_k: 8
+
+input_fusion:
+  slot_dim: 224
+  feat_dim: 224
+  rel_latent_dim: 64
+  temp_latent_dim: 64
+  num_spatial_tokens: 128       # Dense 64x64 CNN feature map compressed to 128 tokens
+  num_colors: 12                # 0-9 palette, 10 mask, 11 unknown
+  num_shapes: 10                # 0-7 canonical, 8 unknown, 9 other
+  num_orientations: 5           # 0-3 (0, 90, 180, 270), 4 unknown
+  num_relations: 16             # 14 canonical + UNKNOWN + OTHER
+  num_events: 16                # 14 canonical + UNKNOWN + OTHER
+  num_affordances: 9
+  num_actions: 8
+  num_action_types: 7           # MOVE_UP, MOVE_DOWN, MOVE_LEFT, MOVE_RIGHT, ACTION, UNDO, CLICK
+
+heads:
+  num_goal_hypotheses: 4
+  val_hidden_dim: 384
+  candidate_actions: [0, 1, 2, 3, 4, 6]
+  rollout_depth: 3
+  lambda_s: 0.5
+  lambda_i: 0.3
+  lambda_v: 1.0
+  lambda_c: 0.1
+  lambda_r: 0.5
+
+# Kaggle Training Infrastructure Settings (Phase 4)
+kaggle_training:
+  hardware:
+    target_accelerator: "dual_t4_or_a100"
+    precision: "auto"           # auto-selects: bfloat16 (A100), float16 (T4), float16/float32 (P100)
+    ddp_enabled: true
+    num_workers: 4
+    pin_memory: true
+
+  optimization:
+    optimizer: "AdamW"
+    learning_rate: 0.0002
+    min_learning_rate: 0.00001
+    weight_decay: 0.01
+    betas: [0.9, 0.95]
+    eps: 1e-8
+    grad_clip_norm: 1.0
+    batch_size_per_gpu: 8
+    gradient_accumulation_steps: 4   # Effective batch size: 32 (single GPU) or 64 (dual GPU)
+    warmup_steps: 1000
+    lr_scheduler: "cosine"
+
+  loss_weights:
+    lambda_state: 1.0
+    lambda_goal: 1.0
+    lambda_dynamics: 1.5
+    lambda_action: 2.0
+    lambda_counterfactual: 0.5
+    lambda_value: 1.0
+    lambda_plan: 0.5
+    lambda_verify: 1.0
+    lambda_efficiency: 0.1
+
+  curriculum_stages:
+    R1_state_understanding:
+      epochs: 5
+      freeze_perception: true
+      active_losses: ["loss_state"]
+    R2_dynamics_world_model:
+      epochs: 10
+      freeze_perception: true
+      active_losses: ["loss_state", "loss_dynamics"]
+    R3_goal_inference:
+      epochs: 10
+      active_losses: ["loss_state", "loss_dynamics", "loss_goal"]
+    R4_action_counterfactual:
+      epochs: 15
+      active_losses: ["loss_action", "loss_counterfactual", "loss_value"]
+    R5_verification_revision:
+      epochs: 10
+      active_losses: ["loss_verify", "loss_dynamics"]
+    R6_multi_step_planning:
+      epochs: 15
+      active_losses: ["loss_plan", "loss_value", "loss_action"]
+    R7_interactive_evaluation:
+      epochs: 10
+      active_losses: ["all"]
+    R8_efficiency_optimization:
+      epochs: 5
+      active_losses: ["all", "loss_efficiency"]

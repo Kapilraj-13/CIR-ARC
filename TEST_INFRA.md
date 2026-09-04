@@ -1,36 +1,34 @@
-# E2E Test Infra: CIR-ARC Phase 2 Neural Perception
+# E2E Test Infra: CIR-ARC Phase 4
 
 ## Test Philosophy
-- Opaque-box, requirement-driven. Derives from ORIGINAL_REQUEST.md.
-- Verification methodology: Category-Partition + Boundary Value Analysis + Pairwise Combinations + Real-World Workloads + Adversarial Coverage Hardening.
+- Opaque-box, requirement-driven, testing all 10 ARC-AGI-3 puzzle mechanics, symbolic state synthesis, causal goal induction, hybrid reasoning, and benchmark scorecard generation.
+- Methodology: Category-Partition + Boundary Value Analysis + Cross-Feature Interactions + Real-World Workload Testing.
 
-## Feature Inventory & Test Mapping
-
-| # | Feature | Source | Tier 1 (Feature) | Tier 2 (Boundary) | Tier 3 (Pairwise) | Tier 4 (Workload) |
-|---|---------|--------|:----------------:|:-----------------:|:-----------------:|:-----------------:|
-| 1 | ColorEmbedding | R1 | 5 tests | 5 tests | ✓ | ✓ |
-| 2 | CNNStem | R1 | 5 tests | 5 tests | ✓ | ✓ |
-| 3 | SlotAttention | R1 | 5 tests | 5 tests | ✓ | ✓ |
-| 4 | PropertyHeads | R1 | 5 tests | 5 tests | ✓ | ✓ |
-| 5 | ReconstructionDecoder | R1 | 5 tests | 5 tests | ✓ | ✓ |
-| 6 | HungarianMatching | R2 | 5 tests | 5 tests | ✓ | ✓ |
-| 7 | Losses (Recon, Prop, Div) | R2 | 5 tests | 5 tests | ✓ | ✓ |
-| 8 | PerceptionModel & Trainer | R3 | 5 tests | 5 tests | ✓ | ✓ |
-| 9 | SyntheticDataset & Padding | R3 | 5 tests | 5 tests | ✓ | ✓ |
-| 10 | PerceptionMetrics | R4 | 5 tests | 5 tests | ✓ | ✓ |
+## Feature Inventory & Test Coverage
+| # | Feature | Source | Tier 1 (Feature) | Tier 2 (Boundary) | Tier 3 (Cross-Feature) | Tier 4 (Scenario) |
+|---|---------|--------|:----------------:|:-----------------:|:----------------------:|:-----------------:|
+| F1 | 10-Mechanic Environments | ORIGINAL_REQUEST §R1 | >=5 | >=5 | ✓ | ✓ |
+| F2 | 10-Tier Difficulty Progression | ORIGINAL_REQUEST §R1 | >=5 | >=5 | ✓ | ✓ |
+| F3 | Symbolic State Synthesizer | ORIGINAL_REQUEST §R2 | >=5 | >=5 | ✓ | ✓ |
+| F4 | Coupled Kinematics / Symmetries | ORIGINAL_REQUEST §R2 | >=5 | >=5 | ✓ | ✓ |
+| F5 | Empirical Transition Matrix | ORIGINAL_REQUEST §R2 | >=5 | >=5 | ✓ | ✓ |
+| F6 | Zero-Reward Goal Induction | ORIGINAL_REQUEST §R2 | >=5 | >=5 | ✓ | ✓ |
+| F7 | Deterministic Symbolic Rule Engine | ORIGINAL_REQUEST §R3 | >=5 | >=5 | ✓ | ✓ |
+| F8 | LLM Provider Interface | ORIGINAL_REQUEST §R3 | >=5 | >=5 | ✓ | ✓ |
+| F9 | Dynamic Sub-goal Replanner | ORIGINAL_REQUEST §R3 | >=5 | >=5 | ✓ | ✓ |
+| F10 | 100-Env Benchmark Runner | ORIGINAL_REQUEST §R4 | >=5 | >=5 | ✓ | ✓ |
+| F11 | Official Benchmark Integration | ORIGINAL_REQUEST §R4 | >=5 | >=5 | ✓ | ✓ |
+| F12 | Comprehensive Test Suite | ORIGINAL_REQUEST §R5 | >=5 | >=5 | ✓ | ✓ |
 
 ## Test Architecture
-- Test Runner: `pytest -v tests/` and `pytest -q`
-- Individual Smoke Tests: `python -m cir_arc.neural.perception.<module>`
-- Total Neural Tests Planned: >= 25 tests
-- Existing Regression Suite: 167 tests (must all pass)
+- Test runner: `uv run pytest`
+- Test files:
+  - `tests/test_interactive_suite.py`: Validates all 10 mechanics, 10 tiers, reset/step/is_terminal, and BaseEnvironment adherence.
+  - `tests/test_symbolic_state.py`: Validates entity extraction, centroids, bboxes, symmetries, coupled multi-agent kinematics, and passable terrain.
+  - `tests/test_hypothesis_inducer.py`: Validates action-effect matrix $P(\Delta s \mid s, a)$ updates and causal zero-reward goal hypotheses formulation across mechanics.
+  - `tests/test_llm_reasoner.py`: Validates deterministic rule engine (<5ms latency), LLM interface mock/local fallback, and dynamic failure replanner.
 
-## Acceptance Verification Criteria
-1. Module correctness: All 167 Phase 1 tests pass + >=20 new neural tests pass.
-2. Smoke tests: Every module executes its CLI entrypoint with exit code 0.
-3. Batch Forward: Batch of 4 random 10x10 grids and heterogeneous batch (5x5, 8x12, 15x15) pass without error.
-4. Parameter Count: Total parameters in `[200000, 500000]` (verified ~401,080).
-5. Attention Invariant: Slot attention maps sum to 1.0 (±1e-5) across slots dimension.
-6. Dataset & Training Step: Load task JSON from `data/synthetic/train/`, complete one forward+backward+step.
-7. Checkpoint Round-Trip: Model produces identical outputs after save and load.
-8. Configs: `configs/phase2.yaml` is valid and parseable.
+## Coverage Goals
+- Maintain 339 existing passing tests.
+- Add >=25 new unit & integration tests (target >=36 new tests -> 375+ total).
+- 100% test pass rate with 0 regressions.
