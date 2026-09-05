@@ -372,10 +372,13 @@ class ReasoningArcDataset(Dataset):
         grid_next = grid_out.copy()
         out_h, out_w = grid_next.shape
         if is_negative and out_h > 0 and out_w > 0:
-            # Perturb next grid to create a deceptive / incorrect transition
-            r_rand = int(self.rng.integers(0, out_h))
-            c_rand = int(self.rng.integers(0, out_w))
-            grid_next[r_rand, c_rand] = int(self.rng.integers(1, 10))
+            try:
+                r_rand = int(self.rng.integers(0, out_h))
+                c_rand = int(self.rng.integers(0, out_w))
+                grid_next[r_rand, c_rand] = int(self.rng.integers(1, 10))
+            except Exception:
+                target_is_error = 0.0
+                grid_next = grid_out.copy()
 
         # Extract structured objects from initial grid
         arc_grid = Grid(grid_in)
@@ -522,9 +525,13 @@ class OfficialArcDataset(Dataset):
         grid_next = grid_out.copy()
         out_h, out_w = grid_next.shape
         if is_negative and out_h > 0 and out_w > 0:
-            r_rand = int(self.rng.integers(0, out_h))
-            c_rand = int(self.rng.integers(0, out_w))
-            grid_next[r_rand, c_rand] = int(self.rng.integers(1, 10))
+            try:
+                r_rand = int(self.rng.integers(0, out_h))
+                c_rand = int(self.rng.integers(0, out_w))
+                grid_next[r_rand, c_rand] = int(self.rng.integers(1, 10))
+            except Exception:
+                target_is_error = 0.0
+                grid_next = grid_out.copy()
 
         arc_grid = Grid(grid_in)
         objs = extract_objects(arc_grid, connectivity=4, background_color=0)
@@ -600,7 +607,7 @@ def collate_reasoning_batch(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
     rule_types = []
 
     for b, item in enumerate(batch):
-        h, w = item["H"], item["W"]
+        h, w = item["grid_t"].shape
         padded_grid_t[b, :h, :w] = item["grid_t"]
         padded_mask_t[b, :h, :w] = item["valid_mask_t"]
 
