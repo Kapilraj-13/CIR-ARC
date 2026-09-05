@@ -8,6 +8,9 @@ from cir_arc.neural.training.dataset import (
 )
 from cir_arc.neural.training.reasoning_dataset import (
     ReasoningArcDataset,
+    OfficialArcDataset,
+    apply_arc_augmentation,
+    ensure_synthetic_data,
     collate_reasoning_batch,
 )
 
@@ -18,6 +21,9 @@ __all__ = [
     "SyntheticDataset",
     "collate_variable_grids",
     "ReasoningArcDataset",
+    "OfficialArcDataset",
+    "apply_arc_augmentation",
+    "ensure_synthetic_data",
     "collate_reasoning_batch",
 ]
 

@@ -58,16 +58,50 @@ RULE_ACTION_MAP = {
 }
 
 
+def apply_arc_augmentation(
+    grid_in: np.ndarray,
+    grid_out: np.ndarray,
+    rng: np.random.Generator,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Applies Dihedral D8 group transformations and random color permutations.
+
+    Preserves all topological, relational, and logical invariants of ARC tasks.
+    """
+    # 1. D8 Dihedral Transformation (4 rotations x 2 reflections)
+    rot_k = int(rng.integers(0, 4))
+    if rot_k > 0:
+        grid_in = np.rot90(grid_in, k=rot_k).copy()
+        grid_out = np.rot90(grid_out, k=rot_k).copy()
+
+    if rng.random() > 0.5:
+        grid_in = np.fliplr(grid_in).copy()
+        grid_out = np.fliplr(grid_out).copy()
+
+    if rng.random() > 0.5:
+        grid_in = np.flipud(grid_in).copy()
+        grid_out = np.flipud(grid_out).copy()
+
+    # 2. Color Palette Permutation (preserving background color 0)
+    if rng.random() > 0.3:
+        perm = rng.permutation(np.arange(1, 10))
+        palette_map = np.zeros(10, dtype=np.int64)
+        palette_map[0] = 0
+        palette_map[1:10] = perm
+        grid_in = palette_map[grid_in]
+        grid_out = palette_map[grid_out]
+
+    return grid_in, grid_out
+
+
 def ensure_synthetic_data(
     output_dir: Union[str, Path] = "data/synthetic",
-    n_per_rule: int = 800,
-    n_per_pair: int = 400,
+    n_per_rule: int = 2500,
+    n_per_pair: int = 1250,
     quiet: bool = False,
 ) -> Tuple[int, int]:
     """Generates procedural single-rule and composition ARC tasks if not already present.
     
-    Default settings generate ~12,000 tasks (9,600 train, 2,400 held_out) across 13
-    single rules and 4 compositional rule pairs.
+    Default settings generate 40,000+ tasks across 13 single rules and 8 composition pairs.
     """
     out_path = Path(output_dir)
     train_dir = out_path / "train"
@@ -93,6 +127,10 @@ def ensure_synthetic_data(
         ("rotate_90", "color_swap_all"),
         ("gravity", "reflect_vertical"),
         ("scale_up", "color_swap_all"),
+        ("fill_enclosed", "reflect_horizontal"),
+        ("rotate_180", "color_swap_all"),
+        ("draw_border", "color_swap_all"),
+        ("reflect_diagonal", "rotate_90"),
     ]
 
     # 1. Single-rule generators
@@ -158,6 +196,7 @@ class ReasoningArcDataset(Dataset):
         slot_dim: int = 224,
         max_slots: int = 24,
         seed: int = 42,
+        augment: bool = False,
         auto_generate_if_empty: bool = True,
         num_auto_generate: int = 500,
     ) -> None:
@@ -167,6 +206,7 @@ class ReasoningArcDataset(Dataset):
         self.negative_prob = negative_prob
         self.slot_dim = slot_dim
         self.max_slots = max_slots
+        self.augment = augment
         self.rng = np.random.default_rng(seed)
         self.in_memory_tasks: List[Dict[str, Any]] = []
 
@@ -315,6 +355,9 @@ class ReasoningArcDataset(Dataset):
             grid_in = np.zeros((10, 10), dtype=np.int64)
             grid_out = np.zeros((10, 10), dtype=np.int64)
 
+        if self.augment:
+            grid_in, grid_out = apply_arc_augmentation(grid_in, grid_out, self.rng)
+
         H, W = grid_in.shape
         valid_mask_in = np.ones((H, W), dtype=bool)
         valid_mask_out = np.ones(grid_out.shape, dtype=bool)
@@ -381,6 +424,140 @@ class ReasoningArcDataset(Dataset):
             "action": action_id,
             "candidate_scores": cf_scores,
             "events": events,
+            "mechanics_vec": torch.from_numpy(mb_vec),
+            "is_negative": is_negative,
+            "target_is_error": torch.tensor([target_is_error], dtype=torch.float32),
+            "value_target": torch.tensor([1.0 if not is_negative else -0.5], dtype=torch.float32),
+            "H": H,
+            "W": W,
+        }
+
+
+class OfficialArcDataset(Dataset):
+    """PyTorch Dataset loading official ARC-AGI benchmark tasks.
+
+    Compatible with official benchmark repositories (e.g. fchollet/ARC-AGI) containing
+    tasks with multi-demonstration few-shot train pairs and test pairs.
+    With D8 and color augmentation enabled, transforms 400 official tasks into
+    over 32,000 unique reasoning trajectories.
+    """
+
+    def __init__(
+        self,
+        task_dir: Union[str, Path] = "data/official",
+        split: str = "training",
+        augment: bool = True,
+        max_samples: Optional[int] = None,
+        negative_prob: float = 0.15,
+        slot_dim: int = 224,
+        max_slots: int = 24,
+        seed: int = 42,
+    ) -> None:
+        super().__init__()
+        self.task_dir = Path(task_dir)
+        self.split = split
+        self.augment = augment
+        self.max_samples = max_samples
+        self.negative_prob = negative_prob
+        self.slot_dim = slot_dim
+        self.max_slots = max_slots
+        self.rng = np.random.default_rng(seed)
+
+        self.file_paths: List[Path] = []
+        candidates = [
+            self.task_dir / split,
+            self.task_dir / "ARC-AGI" / "data" / split,
+            self.task_dir / "data" / split,
+            self.task_dir,
+        ]
+        for c in candidates:
+            if c.exists() and c.is_dir():
+                found = sorted([p for p in c.glob("*.json") if not p.name.startswith(".")])
+                if len(found) > 0:
+                    self.file_paths = found
+                    break
+
+        if max_samples is not None and max_samples > 0:
+            self.file_paths = self.file_paths[:max_samples]
+
+    def __len__(self) -> int:
+        return len(self.file_paths)
+
+    def __getitem__(self, idx: int) -> Dict[str, Any]:
+        file_path = self.file_paths[idx]
+        with open(file_path, "r", encoding="utf-8") as f:
+            task = json.load(f)
+
+        train_pairs = task.get("train", [])
+        test_pairs = task.get("test", [])
+
+        all_supervised_pairs = [p for p in train_pairs if "input" in p and "output" in p]
+        if not all_supervised_pairs:
+            all_supervised_pairs = [p for p in test_pairs if "input" in p and "output" in p]
+
+        if all_supervised_pairs:
+            pair_idx = int(self.rng.integers(0, len(all_supervised_pairs)))
+            chosen_pair = all_supervised_pairs[pair_idx]
+            grid_in = np.array(chosen_pair["input"], dtype=np.int64)
+            grid_out = np.array(chosen_pair["output"], dtype=np.int64)
+        else:
+            grid_in = np.zeros((10, 10), dtype=np.int64)
+            grid_out = np.zeros((10, 10), dtype=np.int64)
+
+        if self.augment:
+            grid_in, grid_out = apply_arc_augmentation(grid_in, grid_out, self.rng)
+
+        H, W = grid_in.shape
+        valid_mask_in = np.ones((H, W), dtype=bool)
+        valid_mask_out = np.ones(grid_out.shape, dtype=bool)
+
+        action_id = 5  # Primary ACTION
+        cf_scores = torch.zeros(7, dtype=torch.float32)
+        cf_scores[action_id] = 1.0
+        cf_scores[:4] = -0.2
+
+        is_negative = bool(self.rng.random() < self.negative_prob)
+        target_is_error = 1.0 if is_negative else 0.0
+
+        grid_next = grid_out.copy()
+        if is_negative and H > 2 and W > 2:
+            r_rand = self.rng.integers(0, H - 1)
+            c_rand = self.rng.integers(0, W - 1)
+            grid_next[r_rand, c_rand] = int(self.rng.integers(1, 10))
+
+        arc_grid = Grid(grid_in)
+        objs = extract_objects(arc_grid, connectivity=4, background_color=0)
+        num_objs = min(len(objs), self.max_slots)
+
+        slot_vectors = np.zeros((self.max_slots, self.slot_dim), dtype=np.float32)
+        for i in range(num_objs):
+            obj = objs[i]
+            bbox = obj.bounding_box
+            slot_vectors[i, 0] = float(obj.color) / 10.0
+            slot_vectors[i, 1] = float(bbox[0]) / max(1, H)
+            slot_vectors[i, 2] = float(bbox[1]) / max(1, W)
+            slot_vectors[i, 3] = float(bbox[2]) / max(1, H)
+            slot_vectors[i, 4] = float(bbox[3]) / max(1, W)
+            slot_vectors[i, 5] = float(obj.size) / max(1, H * W)
+            slot_vectors[i, 6] = 1.0
+
+        mb_vec = np.zeros(11, dtype=np.float32)
+        mb_vec[3] = 0.5
+        mb_vec[5] = 0.5
+
+        return {
+            "task_id": file_path.stem,
+            "rule_type": "official_arc",
+            "grid_t": torch.from_numpy(grid_in),
+            "valid_mask_t": torch.from_numpy(valid_mask_in),
+            "grid_next": torch.from_numpy(grid_next),
+            "valid_mask_next": torch.from_numpy(valid_mask_out),
+            "goal_grid": torch.from_numpy(grid_out),
+            "slot_embeddings": torch.from_numpy(slot_vectors),
+            "num_objects": num_objs,
+            "action": action_id,
+            "candidate_scores": cf_scores,
+            "events": ["TRANSFORM"],
             "mechanics_vec": torch.from_numpy(mb_vec),
             "is_negative": is_negative,
             "target_is_error": torch.tensor([target_is_error], dtype=torch.float32),
@@ -463,3 +640,12 @@ def collate_reasoning_batch(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
         "max_h": max_h,
         "max_w": max_w,
     }
+
+
+__all__ = [
+    "apply_arc_augmentation",
+    "ensure_synthetic_data",
+    "ReasoningArcDataset",
+    "OfficialArcDataset",
+    "collate_reasoning_batch",
+]

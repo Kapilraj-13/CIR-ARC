@@ -2,6 +2,7 @@
 Phase 1 dataset generation script.
 Usage: python scripts/generate_data.py --n_per_rule 1000
 """
+import os
 import sys
 repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(repo_root, "src"))
@@ -24,6 +25,10 @@ COMPOSITION_PAIRS = [
     ("rotate_90", "color_swap_all"),
     ("gravity", "reflect_vertical"),
     ("scale_up", "color_swap_all"),
+    ("fill_enclosed", "reflect_horizontal"),
+    ("rotate_180", "color_swap_all"),
+    ("draw_border", "color_swap_all"),
+    ("reflect_diagonal", "rotate_90"),
 ]
 
 
@@ -74,8 +79,8 @@ def generate_composition_data(n_per_pair: int, output_dir: Path):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--n_per_rule", type=int, default=1000)
-    parser.add_argument("--n_per_pair", type=int, default=500)
+    parser.add_argument("--n_per_rule", type=int, default=2500)
+    parser.add_argument("--n_per_pair", type=int, default=1250)
     parser.add_argument("--output_dir", type=str, default="data/synthetic")
     args = parser.parse_args()
 
