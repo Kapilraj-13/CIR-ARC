@@ -370,12 +370,12 @@ class ReasoningArcDataset(Dataset):
         target_is_error = 1.0 if is_negative else 0.0
 
         grid_next = grid_out.copy()
-        if is_negative:
+        out_h, out_w = grid_next.shape
+        if is_negative and out_h > 0 and out_w > 0:
             # Perturb next grid to create a deceptive / incorrect transition
-            if H > 2 and W > 2:
-                r_rand = self.rng.integers(0, H - 1)
-                c_rand = self.rng.integers(0, W - 1)
-                grid_next[r_rand, c_rand] = int(self.rng.integers(1, 10))
+            r_rand = int(self.rng.integers(0, out_h))
+            c_rand = int(self.rng.integers(0, out_w))
+            grid_next[r_rand, c_rand] = int(self.rng.integers(1, 10))
 
         # Extract structured objects from initial grid
         arc_grid = Grid(grid_in)
@@ -520,9 +520,10 @@ class OfficialArcDataset(Dataset):
         target_is_error = 1.0 if is_negative else 0.0
 
         grid_next = grid_out.copy()
-        if is_negative and H > 2 and W > 2:
-            r_rand = self.rng.integers(0, H - 1)
-            c_rand = self.rng.integers(0, W - 1)
+        out_h, out_w = grid_next.shape
+        if is_negative and out_h > 0 and out_w > 0:
+            r_rand = int(self.rng.integers(0, out_h))
+            c_rand = int(self.rng.integers(0, out_w))
             grid_next[r_rand, c_rand] = int(self.rng.integers(1, 10))
 
         arc_grid = Grid(grid_in)
