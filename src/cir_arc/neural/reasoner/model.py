@@ -157,7 +157,9 @@ class CognitiveReasoner120M(nn.Module):
 
         # 1. Global state token [B, 1, 768]
         if global_vec is None:
-            global_vec = torch.zeros(B, self.config.d_model, device=device)
+            global_vec = torch.zeros(B, self.config.d_model, device=device, dtype=slot_embeddings.dtype)
+        else:
+            global_vec = global_vec.to(dtype=slot_embeddings.dtype)
         global_token = self.dense_projections.global_proj(global_vec).unsqueeze(1)
 
         # 2. Dense Slot tokens [B, K, 768]
@@ -165,17 +167,19 @@ class CognitiveReasoner120M(nn.Module):
 
         # 3. Compressed Spatial tokens [B, 128, 768]
         if spatial_features is not None:
-            comp_spatial = self.dense_projections.compress_spatial_features(spatial_features)
+            comp_spatial = self.dense_projections.compress_spatial_features(spatial_features.to(dtype=slot_embeddings.dtype))
             spatial_tokens = self.dense_projections.spatial_proj(comp_spatial)
         else:
-            spatial_tokens = torch.zeros(B, self.config.num_spatial_tokens, self.config.d_model, device=device)
+            spatial_tokens = torch.zeros(B, self.config.num_spatial_tokens, self.config.d_model, device=device, dtype=slot_embeddings.dtype)
 
         # 4. Working memory tokens [B, 128, 768]
         if working_memory is None:
-            working_memory = self.memory_system.get_initial_working_memory(B, device)
+            working_memory = self.memory_system.get_initial_working_memory(B, device).to(dtype=slot_embeddings.dtype)
+        else:
+            working_memory = working_memory.to(dtype=slot_embeddings.dtype)
 
         # 5. Fresh ephemeral reasoning tokens [B, 128, 768]
-        reasoning_tokens = self.memory_system.get_initial_reasoning_workspace(B, device)
+        reasoning_tokens = self.memory_system.get_initial_reasoning_workspace(B, device).to(dtype=slot_embeddings.dtype)
 
         # Composite sequence: ~280-500 tokens (well within the 8192 ceiling)
         tokens = torch.cat([global_token, slot_tokens, spatial_tokens, working_memory, reasoning_tokens], dim=1)
