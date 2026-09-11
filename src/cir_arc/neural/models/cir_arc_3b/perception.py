@@ -34,10 +34,11 @@ class MultiscaleConvStem(nn.Module):
         self.conv_out = nn.Conv2d(base_channels * 4, 1024, kernel_size=1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        h = F.silu(self.gn1(self.conv1(x)))
-        h = F.silu(self.gn2(self.conv2(h)))
-        h = F.silu(self.gn3(self.conv3(h)))
-        out = self.conv_out(h)
+        dtype = x.dtype
+        h = F.silu(self.gn1(self.conv1(x))).to(dtype)
+        h = F.silu(self.gn2(self.conv2(h))).to(dtype)
+        h = F.silu(self.gn3(self.conv3(h))).to(dtype)
+        out = self.conv_out(h).to(dtype)
         return out
 
 
@@ -58,7 +59,7 @@ class SlotAttentionTracker(nn.Module):
         self.gru = nn.GRUCell(slot_dim, slot_dim)
         self.mlp = nn.Sequential(
             nn.Linear(slot_dim, slot_dim * 2),
-            nn.SiLU(),
+            nn.GELU(),
             nn.Linear(slot_dim * 2, slot_dim),
         )
         self.norm_inputs = nn.LayerNorm(1024)
@@ -67,30 +68,31 @@ class SlotAttentionTracker(nn.Module):
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         # inputs: [B, N, 1024]
+        dtype = inputs.dtype
         B, N, _ = inputs.shape
-        inputs = self.norm_inputs(inputs)
+        inputs = self.norm_inputs(inputs).to(dtype)
         k = self.k_proj(inputs)
         v = self.v_proj(inputs)
 
-        slots = self.slots_init.expand(B, -1, -1)
+        slots = self.slots_init.expand(B, -1, -1).to(dtype)
 
         scale = self.slot_dim ** -0.5
         for _ in range(self.iters):
             slots_prev = slots
-            slots_norm = self.norm_slots(slots)
+            slots_norm = self.norm_slots(slots).to(dtype)
             q = self.q_proj(slots_norm)
 
             dots = torch.matmul(q, k.transpose(-1, -2)) * scale
             attn = F.softmax(dots, dim=-1) + 1e-8
             attn = attn / attn.sum(dim=-1, keepdim=True)
 
-            updates = torch.matmul(attn, v)
+            updates = torch.matmul(attn, v).to(dtype)
             slots = self.gru(
                 updates.reshape(-1, self.slot_dim),
                 slots_prev.reshape(-1, self.slot_dim),
-            ).reshape(B, self.num_slots, self.slot_dim)
+            ).reshape(B, self.num_slots, self.slot_dim).to(dtype)
 
-            slots = slots + self.mlp(self.norm_mlp(slots))
+            slots = slots + self.mlp(self.norm_mlp(slots).to(dtype)).to(dtype)
 
         return slots
 
