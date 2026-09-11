@@ -61,6 +61,12 @@ class RotaryEmbedding(nn.Module):
         freqs_cis = precompute_freqs_cis(dim, max_seq_len, base)
         self.register_buffer("freqs_cis", freqs_cis, persistent=False)
 
+    def _apply(self, fn, recurse=True):
+        res = super()._apply(fn, recurse=recurse)
+        if hasattr(self, "freqs_cis") and self.freqs_cis is not None:
+            self.freqs_cis = self.freqs_cis.to(dtype=torch.complex64)
+        return res
+
     def forward(
         self,
         xq: torch.Tensor,
@@ -71,5 +77,5 @@ class RotaryEmbedding(nn.Module):
             seq_len = xq.shape[1]
         else:
             seq_len = xq.shape[-2]
-        freqs_cis = self.freqs_cis[start_pos : start_pos + seq_len]
+        freqs_cis = self.freqs_cis[start_pos : start_pos + seq_len].to(device=xq.device)
         return apply_rotary_emb(xq, xk, freqs_cis)
