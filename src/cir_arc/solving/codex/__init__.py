@@ -1,0 +1,1 @@
+"""Codex analytical game solvers package."""

@@ -5,6 +5,7 @@ from cir_arc.solving.cognitive_loop import CognitiveLoop, CognitiveContext, Cogn
 from cir_arc.solving.runtime import SolvingRuntime, ScorecardReport
 from cir_arc.solving.search_solvers import AStarSolver, BFSSolver
 from cir_arc.solving.telemetry import AgentOpsTelemetry
+from cir_arc.solving.unified_arc3_agent import UnifiedARC3Agent
 
 # Backwards compatibility alias
 BFSPathSolver = BFSSolver
@@ -20,4 +21,6 @@ __all__ = [
     "BFSSolver",
     "BFSPathSolver",
     "AgentOpsTelemetry",
+    "UnifiedARC3Agent",
 ]
+
