@@ -49,6 +49,11 @@ try:
 except ImportError:
     HAS_XLA = False
 
+# Ensure repo src is in python path
+repo_src = str(Path(__file__).resolve().parent.parent / "src")
+if repo_src not in sys.path:
+    sys.path.insert(0, repo_src)
+
 from cir_arc.neural.models.cir_arc_3b.config import CirArc3BConfig
 from cir_arc.neural.models.cir_arc_3b.model import CirArc3B
 
