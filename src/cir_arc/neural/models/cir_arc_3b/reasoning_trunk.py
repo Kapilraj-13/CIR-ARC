@@ -235,13 +235,13 @@ class GQA_SwiGLU_Trunk3B(nn.Module):
                 attention_mask = attention_mask.to(layer_dev)
 
             if gradient_checkpointing and self.training and not use_cache:
-                def create_custom_forward(module: nn.Module) -> Any:
-                    def custom_forward(*inputs: Any) -> Any:
-                        return module(*inputs)
+                def create_custom_forward(module: nn.Module, dev: torch.device) -> Any:
+                    def custom_forward(h: torch.Tensor, mask: Any = None, cache: Any = None, uc: bool = False) -> Any:
+                        return module(h.to(dev), attention_mask=mask.to(dev) if mask is not None else None, kv_cache=cache, use_cache=uc)
                     return custom_forward
 
                 hidden_states, _ = checkpoint(
-                    create_custom_forward(layer),
+                    create_custom_forward(layer, layer_dev),
                     hidden_states,
                     attention_mask,
                     layer_cache,
