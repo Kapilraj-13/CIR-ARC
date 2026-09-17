@@ -34,11 +34,12 @@ class MultiscaleConvStem(nn.Module):
         self.conv_out = nn.Conv2d(base_channels * 4, 1024, kernel_size=1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        dtype = x.dtype
-        h = F.silu(self.gn1(self.conv1(x))).to(dtype)
-        h = F.silu(self.gn2(self.conv2(h))).to(dtype)
-        h = F.silu(self.gn3(self.conv3(h))).to(dtype)
-        out = self.conv_out(h).to(dtype)
+        w_dtype = self.conv1.weight.dtype
+        x = x.to(dtype=w_dtype)
+        h = F.silu(self.gn1(self.conv1(x)).to(dtype=w_dtype))
+        h = F.silu(self.gn2(self.conv2(h)).to(dtype=w_dtype))
+        h = F.silu(self.gn3(self.conv3(h)).to(dtype=w_dtype))
+        out = self.conv_out(h).to(dtype=w_dtype)
         return out
 
 
@@ -174,6 +175,11 @@ class PerceptionSlotTracker3B(nn.Module):
         Returns:
             Dict containing slot embeddings, visual/functional slots, trunk tokens, and tracking matrices.
         """
+        w_dtype = self.conv_stem.conv1.weight.dtype
+        grid_tensor = grid_tensor.to(dtype=w_dtype)
+        if grid_tensor_next is not None:
+            grid_tensor_next = grid_tensor_next.to(dtype=w_dtype)
+
         features = self.conv_stem(grid_tensor)  # [B, 1024, H, W]
         B, C, H, W = features.shape
         flat_feats = features.permute(0, 2, 3, 1).reshape(B, H * W, C)
