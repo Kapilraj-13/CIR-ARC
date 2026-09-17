@@ -105,60 +105,75 @@ class CirArc3B(nn.Module):
         device = grid_t.device if grid_t is not None else input_token_ids.device
 
         # Stage 1: Perception & Object Slot Extraction
+        p_dev = next(self.perception.parameters()).device
         if grid_t is not None:
-            perc_out = self.perception(grid_t, grid_next)
+            perc_out = self.perception(grid_t.to(p_dev), grid_next.to(p_dev) if grid_next is not None else None)
             slot_tokens = perc_out["trunk_tokens"]
             slots = perc_out["slots"]
         else:
             # Fallback mock slots if processing discrete tokens only
-            slot_tokens = torch.zeros(B, self.config.num_slots, self.config.d_model, device=device)
-            slots = torch.zeros(B, self.config.num_slots, self.config.slot_dim, device=device)
+            slot_tokens = torch.zeros(B, self.config.num_slots, self.config.d_model, device=p_dev)
+            slots = torch.zeros(B, self.config.num_slots, self.config.slot_dim, device=p_dev)
             perc_out = {"slots": slots, "trunk_tokens": slot_tokens}
 
         # Stage 2: Token Interface & Sequence Construction
+        ti_dev = next(self.token_interface.parameters()).device
         if input_token_ids is not None:
-            text_tokens = self.token_interface.embed_tokens(input_token_ids)
-            trunk_inputs = torch.cat([slot_tokens, text_tokens], dim=1)
+            text_tokens = self.token_interface.embed_tokens(input_token_ids.to(ti_dev))
+            trunk_inputs = torch.cat([slot_tokens.to(ti_dev), text_tokens], dim=1)
         else:
-            trunk_inputs = slot_tokens
+            trunk_inputs = slot_tokens.to(ti_dev)
 
         # Stage 3: 24-Layer GQA-SwiGLU Reasoning Trunk
         trunk_hidden, _ = self.trunk(
             trunk_inputs,
             gradient_checkpointing=gradient_checkpointing,
         )
-        trunk_hidden = self.token_interface.apply_final_norm(trunk_hidden)
+        fn_dev = self.token_interface.final_norm.weight.device
+        trunk_hidden = self.token_interface.apply_final_norm(trunk_hidden.to(fn_dev))
         cognitive_state = trunk_hidden[:, 0, :]  # Global cognitive summary state
 
         # Stage 4: Agent Self-Model & Game Model
-        game_res = self.game_model(slots, cognitive_state, action)
+        gm_dev = next(self.game_model.parameters()).device
+        act_gm = action.to(gm_dev) if action is not None else None
+        game_res = self.game_model(slots.to(gm_dev), cognitive_state.to(gm_dev), act_gm)
         reversibility = game_res["reversibility"]
 
         # Stage 5: Causal Program Graph & Attribution
-        action_effect = cognitive_state
-        causal_res = self.causal_graph(slots, action_effect)
+        cg_dev = next(self.causal_graph.parameters()).device
+        action_effect = cognitive_state.to(cg_dev)
+        causal_res = self.causal_graph(slots.to(cg_dev), action_effect)
 
         # Stage 6: Counterfactual World Model Ensemble
-        if action is None:
-            action = torch.zeros(B, dtype=torch.long, device=device)
-        hypothesis_prior = cognitive_state
-        wm_res = self.world_model(cognitive_state, action, hypothesis_prior)
+        wm_dev = next(self.world_model.parameters()).device
+        act_wm = action.to(wm_dev) if action is not None else torch.zeros(B, dtype=torch.long, device=wm_dev)
+        hypothesis_prior = cognitive_state.to(wm_dev)
+        wm_res = self.world_model(cognitive_state.to(wm_dev), act_wm, hypothesis_prior)
 
         # Stage 7: Open-Ended Hypothesis Synthesis (Prediction Residual)
-        target_observed = cognitive_state
-        hypo_res = self.hypothesis_engine(target_observed, wm_res["predicted_state"])
+        he_dev = next(self.hypothesis_engine.parameters()).device
+        target_observed = cognitive_state.to(he_dev)
+        hypo_res = self.hypothesis_engine(target_observed, wm_res["predicted_state"].to(he_dev))
         active_hypothesis = hypo_res["hypotheses"][:, 0, :]
 
         # Stage 8: Three-Tiered Memory & Invariant Falsification
+        mem_dev = next(self.memory_falsifier.parameters()).device
+        cog_mem = cognitive_state.to(mem_dev)
+        hypo_mem = active_hypothesis.to(mem_dev)
         if event_stream is None:
-            event_stream = cognitive_state.unsqueeze(1).expand(-1, self.config.temporal_event_window, -1)
-        mem_res = self.memory_falsifier(cognitive_state, event_stream, active_hypothesis)
+            event_stream = cog_mem.unsqueeze(1).expand(-1, self.config.temporal_event_window, -1)
+        else:
+            event_stream = event_stream.to(mem_dev)
+        mem_res = self.memory_falsifier(cog_mem, event_stream, hypo_mem)
 
         # Stage 9: Belief-Space MPC Planner
-        mpc_res = self.mpc_planner(cognitive_state, active_hypothesis)
+        mpc_dev = next(self.mpc_planner.parameters()).device
+        mpc_res = self.mpc_planner(cognitive_state.to(mpc_dev), active_hypothesis.to(mpc_dev))
 
         # Stage 10: Action Policy, Pointer Clicks, and Irreversible Action Safety Gate
-        action_res = self.action_heads(cognitive_state, reversibility_score=reversibility)
+        ah_dev = next(self.action_heads.parameters()).device
+        rev_ah = reversibility.to(ah_dev) if reversibility is not None else None
+        action_res = self.action_heads(cognitive_state.to(ah_dev), reversibility_score=rev_ah)
 
         return {
             "cognitive_state": cognitive_state,
@@ -174,3 +189,28 @@ class CirArc3B(nn.Module):
             "pointer_logits": action_res["pointer_logits"],
             "entrapment_risk": action_res["entrapment_risk"],
         }
+
+    def parallelize(self, dev0: str = "cuda:0", dev1: str = "cuda:1") -> CirArc3B:
+        """Pipeline CirArc3B across two GPUs (Tesla T4 x 2)."""
+        d0 = torch.device(dev0)
+        d1 = torch.device(dev1)
+
+        # GPU 0: Perception + Token Interface + Trunk Layers 0-11 (~3.0 GB parameters)
+        self.perception.to(d0)
+        self.token_interface.to(d0)
+        for i in range(12):
+            self.trunk.layers[i].to(d0)
+
+        # GPU 1: Trunk Layers 12-23 + Final Norm + Cognitive Modules (~3.0 GB parameters)
+        for i in range(12, 24):
+            self.trunk.layers[i].to(d1)
+        self.token_interface.final_norm.to(d1)
+        self.game_model.to(d1)
+        self.causal_graph.to(d1)
+        self.world_model.to(d1)
+        self.hypothesis_engine.to(d1)
+        self.memory_falsifier.to(d1)
+        self.mpc_planner.to(d1)
+        self.action_heads.to(d1)
+        return self
+

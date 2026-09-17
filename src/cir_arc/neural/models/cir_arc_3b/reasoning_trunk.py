@@ -228,6 +228,11 @@ class GQA_SwiGLU_Trunk3B(nn.Module):
 
         for idx, layer in enumerate(self.layers):
             layer_cache = kv_caches[idx] if kv_caches is not None else None
+            layer_dev = next(layer.parameters()).device
+            if hidden_states.device != layer_dev:
+                hidden_states = hidden_states.to(layer_dev)
+            if attention_mask is not None and attention_mask.device != layer_dev:
+                attention_mask = attention_mask.to(layer_dev)
 
             if gradient_checkpointing and self.training and not use_cache:
                 def create_custom_forward(module: nn.Module) -> Any:
